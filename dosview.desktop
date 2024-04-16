@@ -1,0 +1,9 @@
+[Desktop Entry]
+Version=1.0
+Type=Application
+Name=DosView
+Exec=dosview %f
+Icon=/usr/local/share/icons/icon_ust.png
+MimeType=text/plain;text/dos
+Terminal=false
+Categories=Utility;TextEditor;

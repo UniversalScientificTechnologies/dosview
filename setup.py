@@ -20,6 +20,10 @@ setup(
             'dosview = dosview:main',
         ],
     },
+    data_files=[
+        ('/usr/local/share/applications', ['dosview.desktop']),
+        ('/usr/local/share/icons', ['media/icon_ust.png'])
+    ],
     install_requires=required,
     classifiers=[
         'Development Status :: 3 - Alpha',

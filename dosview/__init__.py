@@ -3,6 +3,7 @@ import argparse
 from PyQt5.QtWidgets import QApplication, QMainWindow, QVBoxLayout, QWidget
 from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg as FigureCanvas
 from matplotlib.backends.backend_qt5agg import NavigationToolbar2QT as NavigationToolbar
+from PyQt5.QtWidgets import QFileDialog
 import random
 import csv
 from matplotlib.figure import Figure
@@ -10,11 +11,19 @@ from threading import Thread
 
 import matplotlib.pyplot as plt
 import pandas as pd
+from PyQt5.QtGui import QIcon
 
 def parse_file(file_path):
 
         metadata = {}
-        df_log = pd.read_csv(file_path, sep = ',', header = None, names=range(505))
+        max_size = 0
+
+        with open(file_path, 'r') as file:
+            for line in file:
+                parts_size = len(line.split(","))
+                if parts_size > max_size: max_size = parts_size
+
+        df_log = pd.read_csv(file_path, sep = ',', header = None, names=range(max_size), low_memory=False)
         data_types = df_log[0].unique().tolist()
 
         df_spectrum = df_log [df_log[0] == '$HIST'] 
@@ -75,7 +84,10 @@ class PlotCanvas(FigureCanvas):
         
         self.axes2 = self.figure.add_subplot(212)  # Add second subplot
         self.axes2.clear()  # Clear previous plot
-        self.axes2.plot(self.data[2], 'b.', alpha=0.3)
+        self.axes2.plot(self.data[2], 'b.-', alpha=0.3)
+
+        self.axes2.set_yscale('log')
+        self.axes2.set_xscale('log')
 
         self.axes2.set_xlabel('Channel')
         self.axes2.set_ylabel('Count')
@@ -100,11 +112,14 @@ class App(QMainWindow):
         self.height = 400
         self.file_path = file_path
         self.initUI()
-
+        
     def initUI(self):
         self.setWindowTitle(self.title)
         self.setGeometry(self.left, self.top, self.width, self.height)
         
+        # Set the window icon
+        self.setWindowIcon(QIcon('media/icon_ust.png'))
+
         m = PlotCanvas(self, width=5, height=4, file_path=self.file_path)
         self.setCentralWidget(m)
         m.move(0,0)
@@ -117,8 +132,18 @@ class App(QMainWindow):
 
 def main():
     parser = argparse.ArgumentParser(description='Process some integers.')
-    parser.add_argument('file_path', type=str, help='Path to the input file')
+    parser.add_argument('file_path', type=str, help='Path to the input file', default=None)
     args = parser.parse_args()
+
+    if not args.file_path:
+        print("Please provide a file path")
+        file_dialog = QFileDialog()
+        file_path, _ = file_dialog.getOpenFileName()
+        if not file_path:
+            print("No file selected")
+            sys.exit()
+        else:
+            args.file_path = file_path
 
     app = QApplication(sys.argv)
     ex = App(args.file_path)
