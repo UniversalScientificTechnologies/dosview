@@ -10,7 +10,7 @@ with open('README.md', 'r', encoding='utf-8') as f:
 
 setup(
     name='dosview',
-    version='0.1',
+    version='0.1.2',
     description='A .dos file viewer', 
     long_description=long_description,
     long_description_content_type='text/markdown',
