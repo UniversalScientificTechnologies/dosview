@@ -2,3 +2,4 @@ matplotlib
 numpy
 pandas
 pyqt5
+setuptools
