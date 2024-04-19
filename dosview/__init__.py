@@ -3,7 +3,8 @@ import argparse
 
 from PyQt5.QtCore import QThread, pyqtSignal
 from PyQt5.QtWidgets import QApplication, QMainWindow, QVBoxLayout, QWidget, QHBoxLayout
-from PyQt5.QtWidgets import QFileDialog, QTreeWidget, QTreeWidgetItem
+from PyQt5.QtWidgets import QFileDialog, QTreeWidget, QTreeWidgetItem, QAction
+
 from PyQt5.QtGui import QIcon
 
 import pyqtgraph as pg
@@ -14,13 +15,60 @@ import pandas as pd
 
 def parse_file(file_path):
 
-        metadata = {}
+        metadata = {
+            'log_runs_count': 0,
+            'log_device_info': {}
+        }
         max_size = 0
 
         with open(file_path, 'r') as file:
             for line in file:
                 parts_size = len(line.split(","))
                 if parts_size > max_size: max_size = parts_size
+
+                for line in file:
+                    parts_size = len(line.split(","))
+                    if parts_size > max_size: max_size = parts_size
+
+                    parts = line.split(",")
+                    match parts[0]:
+                        case "$HIST":
+                            pass
+                            # spec_mod = SpectrumData()
+                            # spec_mod.record = instance
+                            # spec_mod.spectrum = parts[8:]
+                            # spec_mod.integration = 10
+                            # spec_mod.time = parts[2]
+                            # spec_mod.save()
+                        case "$DOS":
+                            print("DOS", line)
+                            metadata['log_runs_count'] += 1
+                            metadata['log_device_info']['DOS'] = {
+                                "type": parts[0],
+                                "hw-model": parts[1],
+                                "fw-version": parts[2],
+                                "fw-build_info": parts[5],
+                                "fw-commit": parts[4],
+                                'hw-sn': parts[6].strip()
+                            }
+                        case "$DIG":
+                            print("DIG", line)
+                            metadata['log_device_info']['DIG'] = {
+                                "type": parts[0],
+                                "hw-model": parts[1],
+                                "hw-sn": parts[2],
+                                'eeprom': parts[3].strip()
+                            }
+                        case "$ADC":
+                            print("ADC", line)
+                            metadata['log_device_info']['ADC'] = {
+                                "type": parts[0],
+                                "hw-model": parts[1],
+                                "hw-sn": parts[2],
+                                'eeprom': parts[3].strip()
+                            }
+                        case _:
+                            pass
 
         df_log = pd.read_csv(file_path, sep = ',', header = None, names=range(max_size), low_memory=False)
         data_types = df_log[0].unique().tolist()
@@ -32,6 +80,7 @@ def parse_file(file_path):
         df_spectrum.columns = new_columns
 
         df_spectrum['time'] = df_spectrum['time'].astype(float)
+        minimal_time = df_spectrum['time'].min()
         duration = df_spectrum['time'].max() - df_spectrum['time'].min()
 
         metadata['log_info'] = {}
@@ -44,11 +93,47 @@ def parse_file(file_path):
 
         df_spectrum['time'] = df_spectrum['time'] - df_spectrum['time'].min()
 
+        time = df_spectrum['time'].to_list()
         sums = df_spectrum.drop('time', axis=1).sum(axis=1) #.div(total_time)
 
         hist = df_spectrum.drop('time', axis=1).sum(axis=0)
 
-        return [df_spectrum['time'], sums, hist]
+        print("Metadata")
+        print(metadata)
+
+
+        df_metadata = pd.DataFrame()
+        
+        try:
+            for index, row in df_log.iterrows():
+                first_column_value = row[0]
+                row_as_list = row.tolist()[2:]
+                
+                match first_column_value:
+                    case '$BATT':
+                        keys = ['time', 'voltage', 'current', 'capacity_remaining', 'capacity_full', 'temperature']
+                        bat = { k:float(v) for (k,v) in zip(keys, row_as_list[0:len(keys)])}
+                        #bat['current'] /= 1000.0
+                        #bat['voltage'] /= 1000.0
+                        df_metadata = pd.concat([df_metadata, pd.DataFrame([bat])], ignore_index=True)
+                        del bat
+                    case '$ENV':
+                        keys = ['time', 'temperature_0', 'humidity_0', 'temperature_1', 'humidity_1', 'temperature_2', 'pressure_3']
+                        env = { k:float(v) for (k,v) in zip(keys, row_as_list[0:len(keys)])}
+                        df_metadata = pd.concat([df_metadata, pd.DataFrame([env])], ignore_index=True)
+                        del env
+                    case '$HIST':
+                        pass
+                    case _:
+                        print('Unknown row', first_column_value)
+        except Exception as e:
+            print(e)
+            
+        print("Telemtric data", minimal_time)
+        df_metadata['time'] = df_metadata['time'] - minimal_time
+        print(df_metadata)
+
+        return [df_spectrum['time'], sums, hist, metadata, df_metadata]
 
 class LoadDataThread(QThread):
     data_loaded = pyqtSignal(list)
@@ -105,8 +190,22 @@ class PlotCanvas(pg.GraphicsLayoutWidget):
         plot_spectrum.setLabel("left", "Total count per channel", units="counts")
         plot_spectrum.setLabel("bottom", "Channel", units="#")
 
+
+        pen = pg.mkPen(color = "brown", width = 2)
+        plot_evolution.plot(self.data[4]['time']/60, self.data[4]['pressure_3'], 
+                        pen=pen, name = "Pressure")
+        plot_evolution.plot(self.data[4]['time']/60, self.data[4]['temperature_0'], 
+                        pen=pen, name = "Temp")
+        plot_evolution.plot(self.data[4]['time']/60, self.data[4]['voltage'], 
+                        pen=pen, name = "Pressure")
+        plot_evolution.plot(self.data[4]['time']/60, self.data[4]['current'], 
+                        pen=pen, name = "Pressure")
+
         plot_spectrum.setLogMode(x=True, y=True)
         plot_spectrum.showGrid(x=True, y=True)
+
+
+        #self.property_tree.
 
 
 
@@ -129,28 +228,48 @@ class App(QMainWindow):
         hl = QHBoxLayout()
         left_column = QVBoxLayout() 
 
-        m = PlotCanvas(self, width=5, height=4, file_path=self.file_path)
+        plot_canvas = PlotCanvas(self, width=5, height=4, file_path=self.file_path)
         
-        # Create a QTreeWidget instance for the properties
-        properties_tree = QTreeWidget()
-        properties_tree.setHeaderLabel("Properties")
+        self.properties_tree = QTreeWidget()
+        self.properties_tree.setHeaderLabel("Properties")
 
-        # Add the properties_tree to the left_column layout
-        left_column.addWidget(properties_tree)
+        left_column.addWidget(self.properties_tree)
 
         hl.addLayout(left_column, stretch=10)
-        hl.addWidget(m, stretch=90)
+        hl.addWidget(plot_canvas, stretch=90)
 
-        # Create a QWidget to set as the central widget
         central_widget = QWidget()
         central_widget.setLayout(hl)
         self.setCentralWidget(central_widget)
-        #self.setLayout(hl)
-        #m.move(0,0)
 
-        #self.addToolBar()
+
+        bar = self.menuBar()
+        file = bar.addMenu("&File")
+
+        open = QAction("Open",self)
+        open.setShortcut("Ctrl+O")
+        file.addAction(open)
+
+        #file.triggered[QAction].connect(self.open_new_file)
+
+        self.setWindowTitle(f"dosview - {self.file_path}")
         
         self.show()
+    
+
+    def open_new_file(self, filename):
+        print("Open new file")
+
+        dlg = QFileDialog()
+        dlg.setFileMode(QFileDialog.AnyFile)
+        dlg.setFilter("Text files (*.txt)") 
+        
+        #filenames = QStringList()
+        filenames = None
+        if dlg.exec_():
+            filenames = dlg.selectedFiles()
+        
+        print(filename, filenames)
 
 
 def main():
