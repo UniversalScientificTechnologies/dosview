@@ -1,17 +1,16 @@
 import sys
 import argparse
-from PyQt5.QtWidgets import QApplication, QMainWindow, QVBoxLayout, QWidget
-from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg as FigureCanvas
-from matplotlib.backends.backend_qt5agg import NavigationToolbar2QT as NavigationToolbar
-from PyQt5.QtWidgets import QFileDialog
-import random
-import csv
-from matplotlib.figure import Figure
-from threading import Thread
 
-import matplotlib.pyplot as plt
-import pandas as pd
+from PyQt5.QtCore import QThread, pyqtSignal
+from PyQt5.QtWidgets import QApplication, QMainWindow, QVBoxLayout, QWidget, QHBoxLayout
+from PyQt5.QtWidgets import QFileDialog
 from PyQt5.QtGui import QIcon
+
+import pyqtgraph as pg
+
+import pandas as pd
+
+
 
 def parse_file(file_path):
 
@@ -51,61 +50,61 @@ def parse_file(file_path):
 
         return [df_spectrum['time'], sums, hist]
 
+class LoadDataThread(QThread):
+    data_loaded = pyqtSignal(list)
 
+    def __init__(self, file_path):
+        QThread.__init__(self)
+        self.file_path = file_path
 
+    def run(self):
+        data = parse_file(self.file_path)
+        self.data_loaded.emit(data)
 
-
-class PlotCanvas(FigureCanvas):
+class PlotCanvas(pg.GraphicsLayoutWidget):
     def __init__(self, parent=None, width=5, height=4, dpi=100, file_path=None):
-        fig = Figure(figsize=(width, height), dpi=dpi)
-        self.axes = fig.add_subplot(211)
-        FigureCanvas.__init__(self, fig)
-        self.setParent(parent)
+        print("PLOT CANVAS INIT")
+        super().__init__(parent)
         self.data = []
         self.file_path = file_path
-        Thread(target=self.load_data).start()
+        print("LOADING DATA ....    ")
+        self.load_data_thread = LoadDataThread(self.file_path)
+        self.load_data_thread.data_loaded.connect(self.on_data_loaded)
+        self.load_data_thread.start()
+        print("DONE")
 
-    def resizeEvent(self, event):
-        self.figure.tight_layout()
-        print("UPDATE LAYOUT ... RESIZE")
-        FigureCanvas.resizeEvent(self, event)
-
-    def load_data(self):
-        self.data = parse_file(self.file_path)
+    def on_data_loaded(self, data):
+        self.data = data
         self.plot()
-        self.figure.tight_layout()
 
     def plot(self):
-        self.axes.clear()  # Clear previous plot
 
-        self.axes.plot(self.data[0]/60.0, self.data[1], 'r.', alpha=0.2)
-        self.axes.figure.canvas.draw()
+        window_size = 20
+
+        self.clear()
+        plot_evolution = self.addPlot(row=0, col=0)
+        plot_spectrum = self.addPlot(row=1, col=0)
+
+        plot_evolution.showGrid(x=True, y=True)
+        plot_evolution.setLabel("left",  "Total count per exposion", units="Counts per exposition")
+        plot_evolution.setLabel("bottom","Time", units="min")
+
+        time_axis = (self.data[0]/60).to_list()
+        plot_evolution.plot(time_axis, self.data[1].to_list(),
+                        symbol ='o', symbolPen ='pink', name ='Channel', pen=None)
         
-        window_size = 20  # Define the size of the window for the moving average
-        rolling_avg = self.data[1].rolling(window=window_size).mean()
-        self.axes.plot(self.data[0]/60.0, rolling_avg, 'r-', lw=2)
-
-        self.axes.set_xlabel('Time (min)')
-        self.axes.set_ylabel('Count (total)')
-        
-        self.axes2 = self.figure.add_subplot(212)  # Add second subplot
-        self.axes2.clear()  # Clear previous plot
-        self.axes2.plot(self.data[2], 'b.-', alpha=0.3)
-
-        self.axes2.set_yscale('log')
-        self.axes2.set_xscale('log')
-
-        self.axes2.set_xlabel('Channel')
-        self.axes2.set_ylabel('Count')
+        pen = pg.mkPen(color="r", width=3)
+        rolling_avg = self.data[1].rolling(window=window_size).mean().to_list()
+        plot_evolution.plot(time_axis, rolling_avg, pen=pen)
 
 
-        self.axes.grid()
-        self.axes2.grid()
+        ev_data = self.data[2].to_list()
+        plot_spectrum.plot(range(len(ev_data)), ev_data, 
+                        pen="r", symbol='x', symbolPen = 'g',
+                        symbolBrush = 0.2, name = "Energy")
+        plot_spectrum.setLabel("left", "Total count per channel", units="counts")
+        plot_spectrum.setLabel("bottom", "Channel", units="#")
 
-        self.axes.figure.canvas.draw()
-
-        self.figure.tight_layout()
-        self.axes.figure.tight_layout()
 
 
 class App(QMainWindow):
@@ -123,15 +122,23 @@ class App(QMainWindow):
         self.setWindowTitle(self.title)
         self.setGeometry(self.left, self.top, self.width, self.height)
         
-        # Set the window icon
         self.setWindowIcon(QIcon('media/icon_ust.png'))
 
-        m = PlotCanvas(self, width=5, height=4, file_path=self.file_path)
-        self.setCentralWidget(m)
-        m.move(0,0)
+        hl = QHBoxLayout()
+        left_column = QHBoxLayout() 
 
-        # Add navigation toolbar
-        self.addToolBar(NavigationToolbar(m, self))
+        m = PlotCanvas(self, width=5, height=4, file_path=self.file_path)
+        
+
+        hl.addLayout(left_column, stretch=90)
+        hl.addWidget(m)
+
+        #self.setCentralWidget()
+        self.setCentralWidget(m)
+        #self.setLayout(hl)
+        #m.move(0,0)
+
+        #self.addToolBar()
         
         self.show()
 
@@ -150,6 +157,10 @@ def main():
             sys.exit()
         else:
             args.file_path = file_path
+
+    pg.setConfigOption('background', 'w')
+    pg.setConfigOption('foreground', 'gray')
+
 
     app = QApplication(sys.argv)
     ex = App(args.file_path)

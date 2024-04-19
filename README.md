@@ -25,7 +25,19 @@ Dosview can be installed using several methods. Below are the instructions for e
    sudo pip3 install git+https://github.com/UniversalScientificTechnologies/dosview.git
    ```
 
+### From local repository clone using pip
+1. solve requirements from previous instructions
+2. Clone your repository 
+```
+  git clone git://github.com:UniversalScientificTechnologies/dosview.git
+  cd dosview
+  sudo pip3 install . 
+```
+
 ### From setup.py
+
+> This way is not recomended
+
 1. Download the source code from the GitHub repository.
 2. Navigate to the directory containing `setup.py`.
 3. Run the following command:

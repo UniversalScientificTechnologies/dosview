@@ -10,16 +10,18 @@ with open('requirements.txt') as f:
 # Read README.md for the long description
 with open('README.md', 'r', encoding='utf-8') as f:
     long_description = f.read()
-    
+
 class PostInstallCommand(install):
     """Post-installation for installation mode."""
     def run(self):
+        print("Dosview intsallation script in progress .. ")
+
         install.run(self)
-        # Copy the .desktop file to the applications directory
+        
         if not os.path.exists('/usr/local/share/applications'):
             os.makedirs('/usr/local/share/applications')
         copyfile('dosview.desktop', '/usr/local/share/applications/dosview.desktop')
-        # Copy the icon file to the icons directory
+        
         if not os.path.exists('/usr/local/share/icons'):
             os.makedirs('/usr/local/share/icons')
         copyfile('media/icon_ust.png', '/usr/local/share/icons/icon_ust.png')
