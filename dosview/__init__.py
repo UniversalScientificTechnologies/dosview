@@ -3,7 +3,7 @@ import argparse
 
 from PyQt5.QtCore import QThread, pyqtSignal
 from PyQt5.QtWidgets import QApplication, QMainWindow, QVBoxLayout, QWidget, QHBoxLayout
-from PyQt5.QtWidgets import QFileDialog
+from PyQt5.QtWidgets import QFileDialog, QTreeWidget, QTreeWidgetItem
 from PyQt5.QtGui import QIcon
 
 import pyqtgraph as pg
@@ -105,6 +105,9 @@ class PlotCanvas(pg.GraphicsLayoutWidget):
         plot_spectrum.setLabel("left", "Total count per channel", units="counts")
         plot_spectrum.setLabel("bottom", "Channel", units="#")
 
+        plot_spectrum.setLogMode(x=True, y=True)
+        plot_spectrum.showGrid(x=True, y=True)
+
 
 
 class App(QMainWindow):
@@ -123,18 +126,25 @@ class App(QMainWindow):
         self.setGeometry(self.left, self.top, self.width, self.height)
         
         self.setWindowIcon(QIcon('media/icon_ust.png'))
-
         hl = QHBoxLayout()
-        left_column = QHBoxLayout() 
+        left_column = QVBoxLayout() 
 
         m = PlotCanvas(self, width=5, height=4, file_path=self.file_path)
         
+        # Create a QTreeWidget instance for the properties
+        properties_tree = QTreeWidget()
+        properties_tree.setHeaderLabel("Properties")
 
-        hl.addLayout(left_column, stretch=90)
-        hl.addWidget(m)
+        # Add the properties_tree to the left_column layout
+        left_column.addWidget(properties_tree)
 
-        #self.setCentralWidget()
-        self.setCentralWidget(m)
+        hl.addLayout(left_column, stretch=10)
+        hl.addWidget(m, stretch=90)
+
+        # Create a QWidget to set as the central widget
+        central_widget = QWidget()
+        central_widget.setLayout(hl)
+        self.setCentralWidget(central_widget)
         #self.setLayout(hl)
         #m.move(0,0)
 
