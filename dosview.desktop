@@ -4,6 +4,6 @@ Type=Application
 Name=DosView
 Exec=dosview %f
 Icon=/usr/local/share/icons/icon_ust.png
-MimeType=text/plain;text/dos
+MimeType=text/x-detector;text/plain;text/dos
 Terminal=false
 Categories=Utility;TextEditor;

@@ -1,4 +1,7 @@
 from setuptools import setup, find_packages
+from setuptools.command.install import install
+from shutil import copyfile
+import os
 
 # Read requirements.txt
 with open('requirements.txt') as f:
@@ -7,6 +10,19 @@ with open('requirements.txt') as f:
 # Read README.md for the long description
 with open('README.md', 'r', encoding='utf-8') as f:
     long_description = f.read()
+    
+class PostInstallCommand(install):
+    """Post-installation for installation mode."""
+    def run(self):
+        install.run(self)
+        # Copy the .desktop file to the applications directory
+        if not os.path.exists('/usr/local/share/applications'):
+            os.makedirs('/usr/local/share/applications')
+        copyfile('dosview.desktop', '/usr/local/share/applications/dosview.desktop')
+        # Copy the icon file to the icons directory
+        if not os.path.exists('/usr/local/share/icons'):
+            os.makedirs('/usr/local/share/icons')
+        copyfile('media/icon_ust.png', '/usr/local/share/icons/icon_ust.png')
 
 setup(
     name='dosview',
@@ -20,11 +36,10 @@ setup(
             'dosview = dosview:main',
         ],
     },
-    data_files=[
-        ('/usr/local/share/applications', ['dosview.desktop']),
-        ('/usr/local/share/icons', ['media/icon_ust.png'])
-    ],
     install_requires=required,
+    cmdclass={
+        'install': PostInstallCommand,
+    },
     classifiers=[
         'Development Status :: 3 - Alpha',
         'Intended Audience :: Developers',

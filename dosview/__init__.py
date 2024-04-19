@@ -65,9 +65,15 @@ class PlotCanvas(FigureCanvas):
         self.file_path = file_path
         Thread(target=self.load_data).start()
 
+    def resizeEvent(self, event):
+        self.figure.tight_layout()
+        print("UPDATE LAYOUT ... RESIZE")
+        FigureCanvas.resizeEvent(self, event)
+
     def load_data(self):
         self.data = parse_file(self.file_path)
         self.plot()
+        self.figure.tight_layout()
 
     def plot(self):
         self.axes.clear()  # Clear previous plot
@@ -112,7 +118,7 @@ class App(QMainWindow):
         self.height = 400
         self.file_path = file_path
         self.initUI()
-        
+
     def initUI(self):
         self.setWindowTitle(self.title)
         self.setGeometry(self.left, self.top, self.width, self.height)
