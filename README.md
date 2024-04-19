@@ -3,6 +3,10 @@
 ## Overview
 **Dosview** is a lightweight, efficient log viewer written in Python3, utilizing the Qt framework for its graphical interface. It is designed to facilitate quick viewing and analysis of log files directly from the command line.
 
+![obrazek](https://github.com/UniversalScientificTechnologies/dosview/assets/5196729/7279580d-4de3-4dfe-9a29-1a9149133691)
+
+
+
 ## Features
 - **Command Line Interface**: Start viewing logs with a simple command.
 - **Fast Performance**: Optimized for quick loading and smooth scrolling through large log files.
