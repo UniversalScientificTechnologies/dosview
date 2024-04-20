@@ -13,6 +13,7 @@ import pandas as pd
 from PyQt5.QtWidgets import QSplitter
 
 
+
 from PyQt5.QtCore import *
 from PyQt5.QtGui import *
 from PyQt5.QtWidgets import *
@@ -88,11 +89,13 @@ def parse_file(file_path):
         duration = df_spectrum['time'].max() - df_spectrum['time'].min()
 
         metadata['log_info'] = {}
+        metadata['log_info']['log_type'] = 'xDOS_SPECTRAL'
+        metadata['log_info']['log_version'] = '1.0'
         metadata['log_info']['internal_time_min'] = df_spectrum['time'].min()
         metadata['log_info']['internal_time_max'] = df_spectrum['time'].max()
         metadata['log_info']['log_duration'] = float(duration)
         metadata['log_info']['spectral_count'] = df_spectrum.shape[0]
-        metadata['log_info']['channels'] = df_spectrum.shape[1] - 1 # remove time column
+        metadata['log_info']['channels'] = df_spectrum.shape[1] - 1
         metadata['log_info']['types'] = data_types
 
         df_spectrum['time'] = df_spectrum['time'] - df_spectrum['time'].min()
@@ -145,9 +148,10 @@ class LoadDataThread(QThread):
         data = parse_file(self.file_path)
         self.data_loaded.emit(data)
 
+
+
 class PlotCanvas(pg.GraphicsLayoutWidget):
-    def __init__(self, parent=None, width=5, height=4, dpi=100, file_path=None):
-        print("PLOT CANVAS INIT")
+    def __init__(self, parent=None, file_path=None):
         super().__init__(parent)
         self.data = []
         self.file_path = file_path
@@ -215,7 +219,7 @@ class App(QMainWindow):
         hl = QHBoxLayout()
         left_column = QVBoxLayout() 
 
-        self.plot_canvas = PlotCanvas(self, width=5, height=4, file_path=self.file_path)
+        self.plot_canvas = PlotCanvas(self, file_path=self.file_path)
         
         self.properties_tree = QTreeWidget()
         self.properties_tree.setColumnCount(2)
@@ -223,8 +227,12 @@ class App(QMainWindow):
 
         central_widget = QWidget()
 
+        self.left_panel = QSplitter(Qt.Vertical)
+        self.left_panel.addWidget(self.properties_tree)
+
+
         self.splitter = QSplitter(Qt.Horizontal)
-        self.splitter.addWidget(self.properties_tree)
+        self.splitter.addWidget(self.left_panel)
         self.splitter.addWidget(self.plot_canvas)
         self.splitter.setSizes([1, 9])
         hl.addWidget(self.splitter)
@@ -237,6 +245,8 @@ class App(QMainWindow):
 
         open = QAction("Open",self)
         open.setShortcut("Ctrl+O")
+        open.triggered.connect(self.open_new_file)
+        
         file.addAction(open)
 
         self.setWindowTitle(f"dosview - {self.file_path}")
@@ -244,7 +254,9 @@ class App(QMainWindow):
         self.start_data_loading()
         
         self.show()
-    
+
+
+
     def start_data_loading(self):
         self.load_data_thread = LoadDataThread(self.file_path)
         self.load_data_thread.data_loaded.connect(self.on_data_loaded)
@@ -253,7 +265,7 @@ class App(QMainWindow):
     def on_data_loaded(self, data):
         print("Data are fully loaded...")
         self.plot_canvas.plot(data)
-
+        
         self.properties_tree.clear()
 
         def add_properties_to_tree(item, properties):
@@ -278,21 +290,18 @@ class App(QMainWindow):
         self.properties_tree.expandAll()
         self.splitter.setSizes([10, 90])
 
-        pass
 
-    def open_new_file(self, filename):
+    def open_new_file(self, flag):
         print("Open new file")
 
-        dlg = QFileDialog()
-        dlg.setFileMode(QFileDialog.AnyFile)
-        dlg.setFilter("Text files (*.dos)") 
+        dlg = QFileDialog(self, "Projects", options=None)
+        dlg.setFileMode(QFileDialog.ExistingFile)
+
+        fn = dlg.getOpenFileName()
+        print(fn)
+
+        dlg.deleteLater()
         
-        #filenames = QStringList()
-        filenames = None
-        if dlg.exec_():
-            filenames = dlg.selectedFiles()
-        
-        print(filename, filenames)
 
 def main():
     parser = argparse.ArgumentParser(description='Process some integers.')
@@ -300,14 +309,7 @@ def main():
     args = parser.parse_args()
 
     if not args.file_path:
-        print("Please provide a file path")
-        file_dialog = QFileDialog()
-        file_path, _ = file_dialog.getOpenFileName()
-        if not file_path:
-            print("No file selected")
-            sys.exit()
-        else:
-            args.file_path = file_path
+        pass
 
     pg.setConfigOption('background', 'w')
     pg.setConfigOption('foreground', 'gray')
