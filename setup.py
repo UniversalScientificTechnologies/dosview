@@ -2,6 +2,7 @@ from setuptools import setup, find_packages
 from setuptools.command.install import install
 from shutil import copyfile
 import os
+import subprocess
 
 # Read requirements.txt
 with open('requirements.txt') as f:
@@ -26,9 +27,12 @@ class PostInstallCommand(install):
             os.makedirs('/usr/local/share/icons')
         copyfile('media/icon_ust.png', '/usr/local/share/icons/icon_ust.png')
 
+# Get the commit hash
+commit_hash = subprocess.check_output(['git', 'rev-parse', 'HEAD']).decode().strip()
+
 setup(
     name='dosview',
-    version='0.1.5',
+    version=f'0.1.5-{commit_hash}',
     description='A .dos file viewer', 
     long_description=long_description,
     long_description_content_type='text/markdown',
