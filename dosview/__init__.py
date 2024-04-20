@@ -11,6 +11,7 @@ import pyqtgraph as pg
 
 import pandas as pd
 
+import
 
 
 def parse_file(file_path):
@@ -203,9 +204,6 @@ class PlotCanvas(pg.GraphicsLayoutWidget):
 
         plot_spectrum.setLogMode(x=True, y=True)
         plot_spectrum.showGrid(x=True, y=True)
-
-
-        #self.property_tree.
 
 
 
