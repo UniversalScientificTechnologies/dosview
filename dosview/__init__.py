@@ -3,16 +3,19 @@ import argparse
 
 from PyQt5.QtCore import QThread, pyqtSignal
 from PyQt5.QtWidgets import QApplication, QMainWindow, QVBoxLayout, QWidget, QHBoxLayout
-from PyQt5.QtWidgets import QFileDialog, QTreeWidget, QTreeWidgetItem, QAction
+from PyQt5.QtWidgets import QFileDialog, QTreeWidget, QTreeWidgetItem, QAction, QSplitter, QTableWidgetItem
 
 from PyQt5.QtGui import QIcon
 
 import pyqtgraph as pg
 
 import pandas as pd
+from PyQt5.QtWidgets import QSplitter
 
-import
 
+from PyQt5.QtCore import *
+from PyQt5.QtGui import *
+from PyQt5.QtWidgets import *
 
 def parse_file(file_path):
 
@@ -99,9 +102,6 @@ def parse_file(file_path):
 
         hist = df_spectrum.drop('time', axis=1).sum(axis=0)
 
-        print("Metadata")
-        print(metadata)
-
 
         df_metadata = pd.DataFrame()
         
@@ -130,9 +130,7 @@ def parse_file(file_path):
         except Exception as e:
             print(e)
             
-        print("Telemtric data", minimal_time)
         df_metadata['time'] = df_metadata['time'] - minimal_time
-        print(df_metadata)
 
         return [df_spectrum['time'], sums, hist, metadata, df_metadata]
 
@@ -153,18 +151,10 @@ class PlotCanvas(pg.GraphicsLayoutWidget):
         super().__init__(parent)
         self.data = []
         self.file_path = file_path
-        print("LOADING DATA ....    ")
-        self.load_data_thread = LoadDataThread(self.file_path)
-        self.load_data_thread.data_loaded.connect(self.on_data_loaded)
-        self.load_data_thread.start()
-        print("DONE")
 
-    def on_data_loaded(self, data):
+    def plot(self, data):
+
         self.data = data
-        self.plot()
-
-    def plot(self):
-
         window_size = 20
 
         self.clear()
@@ -206,7 +196,6 @@ class PlotCanvas(pg.GraphicsLayoutWidget):
         plot_spectrum.showGrid(x=True, y=True)
 
 
-
 class App(QMainWindow):
     def __init__(self, file_path):
         super().__init__()
@@ -221,25 +210,27 @@ class App(QMainWindow):
     def initUI(self):
         self.setWindowTitle(self.title)
         self.setGeometry(self.left, self.top, self.width, self.height)
-        
         self.setWindowIcon(QIcon('media/icon_ust.png'))
+        
         hl = QHBoxLayout()
         left_column = QVBoxLayout() 
 
-        plot_canvas = PlotCanvas(self, width=5, height=4, file_path=self.file_path)
+        self.plot_canvas = PlotCanvas(self, width=5, height=4, file_path=self.file_path)
         
         self.properties_tree = QTreeWidget()
-        self.properties_tree.setHeaderLabel("Properties")
-
-        left_column.addWidget(self.properties_tree)
-
-        hl.addLayout(left_column, stretch=10)
-        hl.addWidget(plot_canvas, stretch=90)
+        self.properties_tree.setColumnCount(2)
+        self.properties_tree.setHeaderLabels(["Property", "Value"])
 
         central_widget = QWidget()
+
+        self.splitter = QSplitter(Qt.Horizontal)
+        self.splitter.addWidget(self.properties_tree)
+        self.splitter.addWidget(self.plot_canvas)
+        self.splitter.setSizes([1, 9])
+        hl.addWidget(self.splitter)
+
         central_widget.setLayout(hl)
         self.setCentralWidget(central_widget)
-
 
         bar = self.menuBar()
         file = bar.addMenu("&File")
@@ -248,19 +239,53 @@ class App(QMainWindow):
         open.setShortcut("Ctrl+O")
         file.addAction(open)
 
-        #file.triggered[QAction].connect(self.open_new_file)
-
         self.setWindowTitle(f"dosview - {self.file_path}")
+
+        self.start_data_loading()
         
         self.show()
     
+    def start_data_loading(self):
+        self.load_data_thread = LoadDataThread(self.file_path)
+        self.load_data_thread.data_loaded.connect(self.on_data_loaded)
+        self.load_data_thread.start()
+
+    def on_data_loaded(self, data):
+        print("Data are fully loaded...")
+        self.plot_canvas.plot(data)
+
+        self.properties_tree.clear()
+
+        def add_properties_to_tree(item, properties):
+            for key, value in properties.items():
+                if isinstance(value, dict):
+                    parent_item = QTreeWidgetItem([key])
+                    item.addChild(parent_item)
+                    add_properties_to_tree(parent_item, value)
+                else:
+                    child_item = QTreeWidgetItem([key, str(value)])
+                    item.addChild(child_item)
+
+        metadata = data[3]
+        for key, value in metadata.items():
+            if isinstance(value, dict):
+                parent_item = QTreeWidgetItem([key])
+                self.properties_tree.addTopLevelItem(parent_item)
+                add_properties_to_tree(parent_item, value)
+            else:
+                self.properties_tree.addTopLevelItem(QTreeWidgetItem([key, str(value)]))
+
+        self.properties_tree.expandAll()
+        self.splitter.setSizes([10, 90])
+
+        pass
 
     def open_new_file(self, filename):
         print("Open new file")
 
         dlg = QFileDialog()
         dlg.setFileMode(QFileDialog.AnyFile)
-        dlg.setFilter("Text files (*.txt)") 
+        dlg.setFilter("Text files (*.dos)") 
         
         #filenames = QStringList()
         filenames = None
@@ -268,7 +293,6 @@ class App(QMainWindow):
             filenames = dlg.selectedFiles()
         
         print(filename, filenames)
-
 
 def main():
     parser = argparse.ArgumentParser(description='Process some integers.')
