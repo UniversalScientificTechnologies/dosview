@@ -32,7 +32,7 @@ commit_hash = subprocess.check_output(['git', 'rev-parse', 'HEAD']).decode().str
 
 setup(
     name='dosview',
-    version=f'0.1.5-{commit_hash}',
+    version=f'0.1.6-{commit_hash}',
     description='A .dos file viewer', 
     long_description=long_description,
     long_description_content_type='text/markdown',

@@ -90,13 +90,14 @@ def parse_file(file_path):
 
         metadata['log_info'] = {}
         metadata['log_info']['log_type'] = 'xDOS_SPECTRAL'
-        metadata['log_info']['log_version'] = '1.0'
+        metadata['log_info']['log_type_version'] = '1.0'
         metadata['log_info']['internal_time_min'] = df_spectrum['time'].min()
         metadata['log_info']['internal_time_max'] = df_spectrum['time'].max()
         metadata['log_info']['log_duration'] = float(duration)
         metadata['log_info']['spectral_count'] = df_spectrum.shape[0]
         metadata['log_info']['channels'] = df_spectrum.shape[1] - 1
         metadata['log_info']['types'] = data_types
+        metadata['log_info']['telemetry_values'] = []
 
         df_spectrum['time'] = df_spectrum['time'] - df_spectrum['time'].min()
 
@@ -155,6 +156,8 @@ class PlotCanvas(pg.GraphicsLayoutWidget):
         super().__init__(parent)
         self.data = []
         self.file_path = file_path
+        self.telemetry_lines = {'temperature_0': None, 'humidity_0': None, 'temperature_1': None, 'humidity_1': None, 'temperature_2': None, 'pressure_3': None, 
+                                'voltage': None, 'current': None, 'capacity_remaining': None, 'capacity_full': None, 'temperature': None}
 
     def plot(self, data):
 
@@ -166,7 +169,7 @@ class PlotCanvas(pg.GraphicsLayoutWidget):
         plot_spectrum = self.addPlot(row=1, col=0)
 
         plot_evolution.showGrid(x=True, y=True)
-        plot_evolution.setLabel("left",  "Total count per exposion", units="Counts per exposition")
+        plot_evolution.setLabel("left",  "Total count per exposition", units="#")
         plot_evolution.setLabel("bottom","Time", units="min")
 
         time_axis = (self.data[0]/60).to_list()
@@ -182,22 +185,25 @@ class PlotCanvas(pg.GraphicsLayoutWidget):
         plot_spectrum.plot(range(len(ev_data)), ev_data, 
                         pen="r", symbol='x', symbolPen = 'g',
                         symbolBrush = 0.2, name = "Energy")
-        plot_spectrum.setLabel("left", "Total count per channel", units="counts")
+        plot_spectrum.setLabel("left", "Total count per channel", units="#")
         plot_spectrum.setLabel("bottom", "Channel", units="#")
 
 
+        plot_evolution.setLabel("right", "Pressure/Temp/Voltage/Current", units="units")
+        plot_evolution.showAxis('right')
         pen = pg.mkPen(color = "brown", width = 2)
-        plot_evolution.plot(self.data[4]['time']/60, self.data[4]['pressure_3'], 
-                        pen=pen, name = "Pressure")
-        plot_evolution.plot(self.data[4]['time']/60, self.data[4]['temperature_0'], 
-                        pen=pen, name = "Temp")
-        plot_evolution.plot(self.data[4]['time']/60, self.data[4]['voltage'], 
-                        pen=pen, name = "Pressure")
-        plot_evolution.plot(self.data[4]['time']/60, self.data[4]['current'], 
-                        pen=pen, name = "Pressure")
+
+        for key, value in self.telemetry_lines.items():
+            self.telemetry_lines[key] = plot_evolution.plot(self.data[4]['time']/60, self.data[4][key], 
+                    pen=pen, name = key)
 
         plot_spectrum.setLogMode(x=True, y=True)
         plot_spectrum.showGrid(x=True, y=True)
+
+
+    def telemetry_toggle(self, key, value):
+        if self.telemetry_lines[key] is not None:
+            self.telemetry_lines[key].setVisible(value)
 
 
 class App(QMainWindow):
@@ -225,9 +231,15 @@ class App(QMainWindow):
         self.properties_tree.setColumnCount(2)
         self.properties_tree.setHeaderLabels(["Property", "Value"])
 
+        self.datalines_tree = QTreeWidget()
+        self.datalines_tree.setColumnCount(1)
+        self.datalines_tree.setHeaderLabels(["Units"])
+
         central_widget = QWidget()
 
         self.left_panel = QSplitter(Qt.Vertical)
+
+        self.left_panel.addWidget(self.datalines_tree)
         self.left_panel.addWidget(self.properties_tree)
 
 
@@ -235,6 +247,9 @@ class App(QMainWindow):
         self.splitter.addWidget(self.left_panel)
         self.splitter.addWidget(self.plot_canvas)
         self.splitter.setSizes([1, 9])
+        sizes = self.splitter.sizes()
+        sizes[0] = int(sizes[1] * 0.1)
+        self.splitter.setSizes(sizes)
         hl.addWidget(self.splitter)
 
         central_widget.setLayout(hl)
@@ -249,12 +264,30 @@ class App(QMainWindow):
         
         file.addAction(open)
 
-        self.setWindowTitle(f"dosview - {self.file_path}")
 
+        help = bar.addMenu("&Help")
+        doc = QAction("Documentation", self)
+        help.addAction(doc)
+        doc.triggered.connect(lambda: QDesktopServices.openUrl(QUrl("https://docs.dos.ust.cz/dosview/")))
+
+        gith = QAction("GitHub", self)
+        help.addAction(gith)
+        gith.triggered.connect(lambda: QDesktopServices.openUrl(QUrl("https://github.com/UniversalScientificTechnologies/dosview/")))
+
+        about = QAction("About", self)
+        help.addAction(about)
+        help.triggered.connect(self.about)
+
+
+
+
+        self.setWindowTitle(f"dosview - {self.file_path}")
         self.start_data_loading()
-        
         self.show()
 
+
+    def about(self):
+        message = QMessageBox.about(self, "About dosview", "dosview is a simple tool to visualize data from Universal Scientific Technologies's")
 
 
     def start_data_loading(self):
@@ -286,10 +319,17 @@ class App(QMainWindow):
                 add_properties_to_tree(parent_item, value)
             else:
                 self.properties_tree.addTopLevelItem(QTreeWidgetItem([key, str(value)]))
+        self.datalines_tree.clear()
+        dataline_options = ['temperature_0', 'humidity_0', 'temperature_1', 'humidity_1', 'temperature_2', 'pressure_3', 'voltage', 'current', 'capacity_remaining', 'temperature']
+        for option in dataline_options:
+            child_item = QTreeWidgetItem([option])
+            child_item.setCheckState(0, Qt.Checked)
+            self.datalines_tree.addTopLevelItem(child_item)
+
+        self.datalines_tree.itemChanged.connect(lambda item, state: self.plot_canvas.telemetry_toggle(item.text(0), item.checkState(0) == Qt.Checked))
+        self.datalines_tree.setMaximumHeight(self.datalines_tree.sizeHintForRow(0) * (self.datalines_tree.topLevelItemCount()+4))
 
         self.properties_tree.expandAll()
-        self.splitter.setSizes([10, 90])
-
 
     def open_new_file(self, flag):
         print("Open new file")
