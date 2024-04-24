@@ -28,11 +28,11 @@ class PostInstallCommand(install):
         copyfile('media/icon_ust.png', '/usr/local/share/icons/icon_ust.png')
 
 # Get the commit hash
-commit_hash = subprocess.check_output(['git', 'rev-parse', 'HEAD']).decode().strip()
+#commit_hash = subprocess.check_output(['git', 'rev-parse', 'HEAD']).decode().strip()
 
 setup(
     name='dosview',
-    version=f'0.1.6-{commit_hash}',
+    version=f'0.1.8',
     description='A .dos file viewer', 
     long_description=long_description,
     long_description_content_type='text/markdown',

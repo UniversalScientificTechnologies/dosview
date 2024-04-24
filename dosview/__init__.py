@@ -206,6 +206,133 @@ class PlotCanvas(pg.GraphicsLayoutWidget):
             self.telemetry_lines[key].setVisible(value)
 
 
+class HIDI2CCommunicationThread(QThread):
+    connected = pyqtSignal(bool)
+    connect = pyqtSignal(bool)
+
+    def __init__(self):
+        QThread.__init__(self)
+        # Initialize HID communication here
+
+    def run(self):
+        # Implement HID communication logic here
+
+        # Connect to HID device
+        self.connected.emit(True)
+        while 1:
+            pass
+
+    @pyqtSlot()
+    def connectSlot(self, state):
+        print("Connecting to HID device... ", state)
+        
+class HIDUARTCommunicationThread(QThread):
+    connected = pyqtSignal(bool)
+
+    def __init__(self):
+        QThread.__init__(self)
+        # Initialize HID communication here
+    
+    def run(self):
+        pass
+        # Implement HID communication logic here
+
+
+class USBStorageMonitoringThread(QThread):
+    connected = pyqtSignal(bool)
+
+    def __init__(self):
+        QThread.__init__(self)
+        # Initialize USB storage monitoring here
+    
+    def run(self):
+        pass
+        # Implement USB storage monitoring logic here
+
+
+class AirdosConfigTab(QWidget):
+    def __init__(self):
+        super().__init__()
+
+        self.i2c_thread = HIDI2CCommunicationThread()
+        self.i2c_thread.connected.connect(self.on_i2c_connected)  
+        self.i2c_thread.start()
+
+        #self.uart_thread = HIDUARTCommunicationThread().start()
+        #self.mass_thread = USBStorageMonitoringThread().start()
+
+        return self.initUI()
+    
+    def on_i2c_connected(self, connected: bool = True):
+        self.i2c_connect_button.setEnabled(not connected)
+        self.i2c_disconnect_button.setEnabled(connected)
+
+    def on_i2c_connect(self):
+        pass
+
+    def on_i2c_disconnect(self):
+        pass
+
+    def on_uart_connect(self):
+        pass
+
+    def on_uart_disconnect(self):
+
+        pass
+    
+    def on_mass_connect(self):
+        pass
+    
+    def on_mass_disconnect(self):
+        pass
+
+    def initUI(self):
+        splitter = QSplitter(Qt.Horizontal)
+        
+        i2c_widget = QGroupBox("I2C")
+        i2c_layout = QVBoxLayout()        
+        i2c_layout.setAlignment(Qt.AlignTop)
+        i2c_widget.setLayout(i2c_layout)
+
+        self.i2c_connect_button = QPushButton("Connect")
+        self.i2c_disconnect_button = QPushButton("Disconnect")
+        self.i2c_connect_button.clicked.connect(lambda: self.i2c_thread.connect(True))
+        self.i2c_disconnect_button.clicked.connect(lambda: self.i2c_thread.connect(False)) 
+        
+        i2c_layout.addWidget(self.i2c_connect_button)
+        i2c_layout.addWidget(self.i2c_disconnect_button)
+        
+
+        uart_widget = QGroupBox("UART")
+        uart_layout = QVBoxLayout()
+        uart_layout.setAlignment(Qt.AlignTop)
+        uart_widget.setLayout(uart_layout)
+        
+        uart_connect_button = QPushButton("Connect")
+        uart_disconnect_button = QPushButton("Disconnect")
+        uart_layout.addWidget(uart_connect_button)
+        uart_layout.addWidget(uart_disconnect_button)
+        
+        data_memory_widget = QGroupBox("Data memory")
+        data_memory_layout = QVBoxLayout()
+        data_memory_layout.setAlignment(Qt.AlignTop)
+        data_memory_widget.setLayout(data_memory_layout)
+        
+        data_memory_connect_button = QPushButton("Connect")
+        data_memory_disconnect_button = QPushButton("Disconnect")
+        data_memory_layout.addWidget(data_memory_connect_button)
+        data_memory_layout.addWidget(data_memory_disconnect_button)
+        
+        
+        splitter.addWidget(i2c_widget)
+        splitter.addWidget(uart_widget)
+        splitter.addWidget(data_memory_widget)
+        
+        layout = QVBoxLayout()
+        layout.addWidget(splitter)
+        self.setLayout(layout)
+
+
 class App(QMainWindow):
     def __init__(self, file_path):
         super().__init__()
@@ -222,8 +349,6 @@ class App(QMainWindow):
         self.setGeometry(self.left, self.top, self.width, self.height)
         self.setWindowIcon(QIcon('media/icon_ust.png'))
         
-        hl = QHBoxLayout()
-        left_column = QVBoxLayout() 
 
         self.plot_canvas = PlotCanvas(self, file_path=self.file_path)
         
@@ -235,7 +360,7 @@ class App(QMainWindow):
         self.datalines_tree.setColumnCount(1)
         self.datalines_tree.setHeaderLabels(["Units"])
 
-        central_widget = QWidget()
+        log_view_widget = QWidget()
 
         self.left_panel = QSplitter(Qt.Vertical)
 
@@ -243,17 +368,21 @@ class App(QMainWindow):
         self.left_panel.addWidget(self.properties_tree)
 
 
-        self.splitter = QSplitter(Qt.Horizontal)
-        self.splitter.addWidget(self.left_panel)
-        self.splitter.addWidget(self.plot_canvas)
-        self.splitter.setSizes([1, 9])
-        sizes = self.splitter.sizes()
+        self.logView_splitter = QSplitter(Qt.Horizontal)
+        self.logView_splitter.addWidget(self.left_panel)
+        self.logView_splitter.addWidget(self.plot_canvas)
+        self.logView_splitter.setSizes([1, 9])
+        sizes = self.logView_splitter.sizes()
         sizes[0] = int(sizes[1] * 0.1)
-        self.splitter.setSizes(sizes)
-        hl.addWidget(self.splitter)
+        self.logView_splitter.setSizes(sizes)
 
-        central_widget.setLayout(hl)
-        self.setCentralWidget(central_widget)
+        tab_widget = QTabWidget()
+        tab_widget.addTab(self.logView_splitter, "Log View")
+        self.airdos_config = AirdosConfigTab()
+        tab_widget.addTab(self.airdos_config, "Airdos control")
+
+        tab_widget.setCurrentIndex(0)
+        self.setCentralWidget(tab_widget)
 
         bar = self.menuBar()
         file = bar.addMenu("&File")
@@ -270,7 +399,7 @@ class App(QMainWindow):
         help.addAction(doc)
         doc.triggered.connect(lambda: QDesktopServices.openUrl(QUrl("https://docs.dos.ust.cz/dosview/")))
 
-        gith = QAction("GitHub", self)
+        gith = QAction("Dosview GitHub", self)
         help.addAction(gith)
         gith.triggered.connect(lambda: QDesktopServices.openUrl(QUrl("https://github.com/UniversalScientificTechnologies/dosview/")))
 
@@ -278,7 +407,9 @@ class App(QMainWindow):
         help.addAction(about)
         help.triggered.connect(self.about)
 
-
+        self.statusBar = QStatusBar()
+        self.setStatusBar(self.statusBar)
+        self.statusBar.showMessage("Welcome to dosview")
 
 
         self.setWindowTitle(f"dosview - {self.file_path}")
@@ -345,11 +476,13 @@ class App(QMainWindow):
 
 def main():
     parser = argparse.ArgumentParser(description='Process some integers.')
-    parser.add_argument('file_path', type=str, help='Path to the input file', default=None)
+    parser.add_argument('file_path', type=str, help='Path to the input file', default=None, nargs='?')
     args = parser.parse_args()
 
     if not args.file_path:
         pass
+
+    print("...", args.file_path)
 
     pg.setConfigOption('background', 'w')
     pg.setConfigOption('foreground', 'gray')
