@@ -12,11 +12,14 @@ import pyqtgraph as pg
 import pandas as pd
 from PyQt5.QtWidgets import QSplitter
 
-
+import datetime
+import time 
 
 from PyQt5.QtCore import *
 from PyQt5.QtGui import *
 from PyQt5.QtWidgets import *
+
+import hid
 
 def parse_file(file_path):
 
@@ -151,6 +154,7 @@ class LoadDataThread(QThread):
 
 
 
+
 class PlotCanvas(pg.GraphicsLayoutWidget):
     def __init__(self, parent=None, file_path=None):
         super().__init__(parent)
@@ -206,9 +210,436 @@ class PlotCanvas(pg.GraphicsLayoutWidget):
             self.telemetry_lines[key].setVisible(value)
 
 
+class FT260HidDriver():
+
+    """
+    Key to symbols
+    ==============
+
+    S     (1 bit) : Start bit
+    P     (1 bit) : Stop bit
+    Rd/Wr (1 bit) : Read/Write bit. Rd equals 1, Wr equals 0.
+    A, NA (1 bit) : Accept and reverse accept bit.
+    Addr  (7 bits): I2C 7 bit address. Note that this can be expanded as usual to
+                    get a 10 bit I2C address.
+    Comm  (8 bits): Command byte, a data byte which often selects a register on
+                    the device.
+    Data  (8 bits): A plain data byte. Sometimes, I write DataLow, DataHigh
+                    for 16 bit data.
+    Count (8 bits): A data byte containing the length of a block operation.
+
+    [..]: Data sent by I2C device, as opposed to data sent by the host adapter.
+
+    More detail documentation is at https://www.kernel.org/doc/Documentation/i2c/smbus-protocol
+    """
+
+    def __init__(self, port, device):
+        self.port = port
+        #self.smbus = smbus
+        self.driver_type = 'ft260_hid'
+        self.device = device
+        self.initialize_ftdi()
+    
+
+
+    def initialize_ftdi(self):
+        # TODO pripojeni k HID, nyni to mam jako self.device
+        
+        print(f'Device manufacturer: {self.device.get_manufacturer_string()}')
+        print(f'Product: {self.device.get_product_string()}')
+        print(f'Serial Number: {self.device.get_serial_number_string()}')
+
+        self.device.set_nonblocking(0)
+
+        self.reset_i2c()
+        #self.set_i2c_speed(100000) # 100 Khz
+        self.get_i2c_status()
+
+
+    def get_i2c_status(self):
+        d = self.device.get_feature_report(0xC0, 100)
+
+        status = ['busy_chip', 'error', 'no_ack', 'arbitration_lost', 'idle', 'busy_bus']
+        bits = [(d[1] & (1 << i)) >> i for i in range(8)]
+        status = dict(zip(status, bits))
+
+        baudrate = (d[2] | d[3]<<8)*1000
+        status['baudrate'] = baudrate
+
+        return status
+        
+    
+    def reset_i2c(self):
+        self.device.send_feature_report([0xA1, 0x20])
+        
+    def set_i2c_speed(self, speed = 100000):
+        speed = int(speed/1000)
+        LSB = (speed & 0xff)
+        MSB = (speed>>8 & 0xff)
+        print(f"Nastavit speed na {speed} Hz: ", hex(LSB), hex(MSB))
+        self.device.send_feature_report([0xA1, 0x22, LSB, MSB])
+
+
+    def write_byte(self, address, value):
+        """
+        SMBus Send Byte:  i2c_smbus_write_byte()
+        ========================================
+
+        This operation is the reverse of Receive Byte: it sends a single byte
+        to a device.  See Receive Byte for more information.
+
+        S Addr Wr [A] Data [A] P
+
+        Functionality flag: I2C_FUNC_SMBUS_WRITE_BYTE
+        """
+
+        return None
+
+    def read_byte(self, address):
+        """
+        SMBus Send Byte:  i2c_smbus_write_byte()
+        ========================================
+
+        This operation is the reverse of Receive Byte: it sends a single byte
+        to a device.  See Receive Byte for more information.
+
+        S Addr Wr [A] Data [A] P
+
+        Functionality flag: I2C_FUNC_SMBUS_WRITE_BYTE
+        """
+        return None
+
+    def write_byte_data(self, address, register, value):
+        """
+        SMBus Read Byte:  i2c_smbus_read_byte_data()
+        ============================================
+
+        This reads a single byte from a device, from a designated register.
+        The register is specified through the Comm byte.
+
+        S Addr Wr [A] Comm [A] S Addr Rd [A] [Data] NA P
+
+        Functionality flag: I2C_FUNC_SMBUS_READ_BYTE_DATA
+        """
+
+        return self.device.write([0xD0, address, 0x06, 2, register, value])
+
+
+    def read_byte_data(self, address, register):
+        """
+        SMBus Read Byte:  i2c_smbus_read_byte_data()
+        ============================================
+
+        This reads a single byte from a device, from a designated register.
+        The register is specified through the Comm byte.
+
+        S Addr Wr [A] Comm [A] S Addr Rd [A] [Data] NA P
+
+        Functionality flag: I2C_FUNC_SMBUS_READ_BYTE_DATA
+        """
+
+
+        payload = [0xD0, address, 0x06, 0b01, register]
+        self.device.write(payload)
+        length = (1).to_bytes(2, byteorder='little')
+        self.device.write([0xC2, address, 0x06, length[0], length[1]])
+        d = self.device.read(0xde)
+
+        # TODO: Osetrit chyby v chybnem vycteni registru
+        return d[2]
+
+
+    def write_word_data(self, address, register, value):
+        """
+        SMBus Write Word:  i2c_smbus_write_word_data()
+        ==============================================
+
+        This is the opposite of the Read Word operation. 16 bits
+        of data is written to a device, to the designated register that is
+        specified through the Comm byte.
+
+        S Addr Wr [A] Comm [A] DataLow [A] DataHigh [A] P
+
+        Functionality flag: I2C_FUNC_SMBUS_WRITE_WORD_DATA
+
+        Note the convenience function i2c_smbus_write_word_swapped is
+        available for writes where the two data bytes are the other way
+        around (not SMBus compliant, but very popular.)
+        """
+        return self.device.write([0xD0, address, 0x06, 3, register, (value)&0xff, (value>>8)&0xff ])
+
+    def read_word_data(self, address, register):
+        """
+        SMBus Read Word:  i2c_smbus_read_word_data()
+        ============================================
+
+        This operation is very like Read Byte; again, data is read from a
+        device, from a designated register that is specified through the Comm
+        byte. But this time, the data is a complete word (16 bits).
+
+        S Addr Wr [A] Comm [A] S Addr Rd [A] [DataLow] A [DataHigh] NA P
+
+        Functionality flag: I2C_FUNC_SMBUS_READ_WORD_DATA
+
+        Note the convenience function i2c_smbus_read_word_swapped is
+        available for reads where the two data bytes are the other way
+        around (not SMBus compliant, but very popular.)
+        """
+
+        payload = [0xD0, address, 0x06, 0b01, register]
+        self.device.write(payload)
+        length = (2).to_bytes(2, byteorder='little')
+        self.device.write([0xC2, address, 0x06, length[0], length[1]])
+        d = self.device.read(0xde)
+
+        # TODO: Osetrit chyby v chybnem vycteni registru
+        return d[2]<<8 | d[3]
+
+    def write_block_data(self, address, register, value):
+        """
+        SMBus Block Write:  i2c_smbus_write_block_data()
+        ================================================
+
+        The opposite of the Block Read command, this writes up to 32 bytes to
+        a device, to a designated register that is specified through the
+        Comm byte. The amount of data is specified in the Count byte.
+
+        S Addr Wr [A] Comm [A] Count [A] Data [A] Data [A] ... [A] Data [A] P
+
+        Functionality flag: I2C_FUNC_SMBUS_WRITE_BLOCK_DATA
+        """
+        raise NotImplementedError
+
+    def read_block_data(self, address, register):
+        """
+        SMBus Block Read:  i2c_smbus_read_block_data()
+        ==============================================
+
+        This command reads a block of up to 32 bytes from a device, from a
+        designated register that is specified through the Comm byte. The amount
+        of data is specified by the device in the Count byte.
+
+        S Addr Wr [A] Comm [A]
+                   S Addr Rd [A] [Count] A [Data] A [Data] A ... A [Data] NA P
+
+        Functionality flag: I2C_FUNC_SMBUS_READ_BLOCK_DATA
+        """
+        raise NotImplementedError
+
+    def block_process_call(self, address, register, value):
+        """
+        SMBus Block Write - Block Read Process Call
+        ===========================================
+
+        SMBus Block Write - Block Read Process Call was introduced in
+        Revision 2.0 of the specification.
+
+        This command selects a device register (through the Comm byte), sends
+        1 to 31 bytes of data to it, and reads 1 to 31 bytes of data in return.
+
+        S Addr Wr [A] Comm [A] Count [A] Data [A] ...
+                                     S Addr Rd [A] [Count] A [Data] ... A P
+
+        Functionality flag: I2C_FUNC_SMBUS_BLOCK_PROC_CALL
+        """
+        raise NotImplementedError
+
+    ### I2C transactions not compatible with pure SMBus driver
+    def write_i2c_block(self, address, value):
+        """
+        Simple send transaction
+        ======================
+
+        This corresponds to i2c_master_send.
+
+          S Addr Wr [A] Data [A] Data [A] ... [A] Data [A] P
+
+        More detail documentation is at: https://www.kernel.org/doc/Documentation/i2c/i2c-protocol
+        """
+        raise NotImplementedError
+
+    def read_i2c_block(self, address, length):
+        """
+        Simple receive transaction
+        ===========================
+
+        This corresponds to i2c_master_recv
+
+          S Addr Rd [A] [Data] A [Data] A ... A [Data] NA P
+
+        More detail documentation is at: https://www.kernel.org/doc/Documentation/i2c/i2c-protocol
+        """
+        raise NotImplementedError
+
+    def write_i2c_block_data(self, address, register, value):
+        """
+        I2C block transactions do not limit the number of bytes transferred
+        but the SMBus layer places a limit of 32 bytes.
+
+        I2C Block Write:  i2c_smbus_write_i2c_block_data()
+        ==================================================
+
+        The opposite of the Block Read command, this writes bytes to
+        a device, to a designated register that is specified through the
+        Comm byte. Note that command lengths of 0, 2, or more bytes are
+        supported as they are indistinguishable from data.
+
+        S Addr Wr [A] Comm [A] Data [A] Data [A] ... [A] Data [A] P
+
+        Functionality flag: I2C_FUNC_SMBUS_WRITE_I2C_BLOCK
+        """
+        
+        payload = [0xD0, address, 0x06, len(value) + 1, register] + value
+        self.device.write(payload)
+
+
+    def read_i2c_block_data(self, address, register, length):
+        data = []
+        for i in range(length):
+            self.write_byte_data(address, register, i)
+            byte = self.read_byte(address)
+            data.append(byte)
+        return data
+        
+    def read_i2c_block_data(self, address, register, length):
+        """
+        I2C Block Read: i2c_smbus_read_i2c_block_data()
+        =================================================
+
+        Reads a block of bytes from a specific register in a device. It's the direct
+        opposite of the Block Write command, primarily used for retrieving a series
+        of bytes from a given register.
+
+        S Addr Wr [A] Comm [A] S Addr Rd [A] Data [A] Data [A] ... [A] Data [A] P
+
+        The method respects SMBus limitations of 32 bytes for block transactions.
+        """
+
+        timeout = 500
+
+        register = (register).to_bytes(2, byteorder='little')
+        payload = [0xD4, address, 0x02, 2, register[0], register[1]]
+        self.device.write(payload)
+        length = (length).to_bytes(2, byteorder='little')
+        self.device.write([0xC2, address, 0x07, length[0], length[1]])
+        d = self.device.read(0xde, timeout)
+
+        print(d)
+
+        return d[2:d[1]]
+
+    def write_i2c_block_data(self, address, register, data):
+        """
+        I2C Block Write: i2c_smbus_write_i2c_block_data()
+        =================================================
+
+        Writes a block of bytes to a specific register in a device. This command
+        is designed for direct I2C communication, allowing for command lengths of 0,
+        2, or more bytes, which are indistinguishable from data.
+
+        S Addr Wr [A] Comm [A] Data [A] Data [A] ... [A] Data [A] P
+
+        Functionality flag: I2C_FUNC_SMBUS_WRITE_I2C_BLOCK
+        """
+
+        register = (register).to_bytes(2, byteorder='little')
+        payload = [0xD4, address, 0x06, 0, register[0], register[1]] + data
+        payload[3] = len(payload) - 4
+        self.device.write(payload)
+
+        return True
+    
+
+
+
+class eeprom():
+    def __init__(self, bus, address):
+        self.bus = bus
+        self.address = address
+        
+    def read_serial_number(self):
+        serial_number = []
+        #self.bus.write_byte_data(self.address+8, 0x08, 0x00)
+        self.bus.write_byte_data(0x58, 0x08, 0x00)
+        for _ in range(16):
+            serial_byte = self.bus.read_byte(0x58)
+            serial_number.append(serial_byte)
+            print("Serial byte: ", serial_byte)
+        
+        result_number = 0
+        for b in serial_number:
+            result_number = (result_number << 8) | b
+
+        #devices.append(address)
+        return result_number
+
+    def read_eeprom(self, len):
+        serial_number = []
+        self.bus.write_byte_data(self.address, 0x00, 0x00)
+        for _ in range(len):
+            serial_byte = self.bus.read_byte(self.address)
+            serial_number.append(serial_byte)
+        
+        result_number = 0
+        for b in serial_number:
+            result_number = (result_number << 8) | b
+
+        #devices.append(address)
+        #return result_number
+        return serial_number
+
+    def write_to_eeprom(self, data, offset = 0):
+        mem_addr_b = offset & 0xff
+        mem_addr_a = (offset>>8) & 0xff
+
+        self.bus.write_i2c_block_data(address, mem_addr_a, [mem_addr_b]+data)
+
+
 class HIDI2CCommunicationThread(QThread):
     connected = pyqtSignal(bool)
     connect = pyqtSignal(bool)
+    sendAirdosStatus = pyqtSignal(dict)
+
+    VID = 0x0403
+    PID = 0x6030
+    VID = 0x1209    
+    PID = 0x7aa0
+    I2C_INTERFACE = 0
+
+
+    addr_switch = 0x70
+    addr_switch = 0x7c
+    addr_charger = 0x6a
+    addr_gauge = 0x55
+    addr_rtc = 0x51
+    addr_eeprom = 0x50
+    addr_eepromsn = 0x58
+
+    addr_sht = 0x44
+    addr_switch = 0x70
+    addr_sdcard = 0x71
+    addr_charger = 0x6a
+    addr_gauge = 0x55
+    addr_rtc = 0x51
+    addr_eeprom = 0x50
+    addr_eepromsn = 0x58
+    addr_altimet = 0x77
+    addr_an_sht = 0x45
+    addr_an_eeprom = 0x53
+    addr_an_eepromsn = 0x5b
+
+    basic_params = {}
+
+    
+    # Příkazy pro čtení teploty a vlhkosti
+    temperature_cmd = [0x24, 0x00]  # Příkaz pro čtení teploty v režimu High Precision
+    humidity_cmd = [0x24, 0x16]     # Příkaz pro čtení vlhkosti v režimu High Precision
+    serial_number_cmd = [0x37, 0x80]
+
+
+
+    dev = None
+    ftdi = None
 
     def __init__(self):
         QThread.__init__(self)
@@ -218,13 +649,204 @@ class HIDI2CCommunicationThread(QThread):
         # Implement HID communication logic here
 
         # Connect to HID device
-        self.connected.emit(True)
+        self.connected.emit(False)
         while 1:
             pass
+    
+
+    # Funkce pro čtení dat ze senzoru
+    def sht_read_sensor_data(self, address, cmd):
+        
+        register = (0x08).to_bytes(2, byteorder='little')
+        payload = [0xD4, address, 0x06, 2, cmd[0], cmd[1]]
+        self.dev.write(payload)
+        time.sleep(0.4)
+        length = (6).to_bytes(2, byteorder='little')
+        self.dev.write([0xC2, address, 0x06, length[0], length[1]])
+        data = self.dev.read(0xde, 1000)[2:]
+
+        print("... SHT data:", data)
+        raw_temperature = (data[0] << 8) + data[1]
+        raw_humidity = (data[3] << 8) + data[4]
+        temperature = -45 + 175 * (raw_temperature / 65535.0)  # Výpočet teploty
+        humidity = 100 * (raw_humidity / 65535.0)             # Výpočet vlhkosti
+        return temperature, humidity
+
+
+    def sht_read_sn(self, cmd):
+        self.ftdi.write_i2c_block_data(self.addr_sht, cmd[0], [cmd[1]])
+        data = self.ftdi.read_i2c_block_data(self.addr_sht, 0, 6)
+        print(data)
+        serial_number = (data[0] << 24) | (data[1] << 16) | (data[3] << 8) | data[4]
+        return serial_number
 
     @pyqtSlot()
-    def connectSlot(self, state):
+    def connectSlot(self, state = True, power_off = False):
         print("Connecting to HID device... ", state)
+        if state:
+            self.dev = hid.device()
+            self.dev.open(self.VID, self.PID)
+            print("Connected to HID device", self.dev)
+
+            self.dev.send_feature_report([0xA1, 0x20])
+            self.dev.send_feature_report([0xA1, 0x02, 0x01])
+
+            self.ftdi = FT260HidDriver(0, self.dev)
+
+            # Přepnout I2C switch na I2C z USB
+            self.ftdi.write_byte_data(self.addr_switch, 0x01, 0x03)
+
+            # self.ftdi.write_byte_data(self.addr_charger, 0x26, 0b10111000) # ????? 
+            self.ftdi.write_byte_data(self.addr_charger, 0x18, 0b00011000)
+
+
+            print("AIRDOS SN ... ")
+            eeprom_data = self.ftdi.read_i2c_block_data(self.addr_eepromsn, 0x08, 18)
+            print(eeprom_data)
+            sn = 0
+            for s in eeprom_data:
+                sn = (sn << 8) | s
+            print(hex(sn))
+            self.basic_params['sn_batdatunit'] = hex(sn)
+
+            eeprom_data = self.ftdi.read_i2c_block_data(self.addr_an_eepromsn, 0x08, 18)
+            print(eeprom_data)
+            sn = 0
+            for s in eeprom_data:
+                sn = (sn << 8) | s
+            print(hex(sn))
+            self.basic_params['sn_ustsipin'] = hex(sn)
+
+            self.connected.emit(True)
+        
+        else:
+            
+            # Vypnout nabijecku pokud je pozadovano
+            if power_off:
+                self.ftdi.write_byte_data(self.addr_charger, 0x18, 0b00011010)
+
+            self.ftdi.write_byte_data(self.addr_switch, 0x01, 0x04)   # vratit I2C sbernici do puvodniho stavu 
+
+            self.dev.close()
+            self.dev = None
+            self.ftdi = None
+            self.connected.emit(False)
+
+    def get_time(self):        
+        # self.addr_rtc = 0x51
+        r00 = self.ftdi.read_byte_data(self.addr_rtc, 0x00)
+        r01 = self.ftdi.read_byte_data(self.addr_rtc, 0x01)
+        r02 = self.ftdi.read_byte_data(self.addr_rtc, 0x02)
+        r03 = self.ftdi.read_byte_data(self.addr_rtc, 0x03)
+        r04 = self.ftdi.read_byte_data(self.addr_rtc, 0x04)
+        r06 = self.ftdi.read_byte_data(self.addr_rtc, 0x06)
+        r07 = self.ftdi.read_byte_data(self.addr_rtc, 0x07)
+
+        sec100 = r00
+        absdate = datetime.datetime.utcnow()
+        sec = ((r01 >> 4) & 0b111) * 10 + (r01 & 0b1111)
+        minu= ((r02 >> 4) & 0b111) * 10 + (r02 & 0b1111)
+        hourL= ((r03 >> 4) & 0b11) * 10 + (r03 & 0b1111)
+        hourM = ((r04 >> 4) & 0b11) * 10 + (r04 & 0b1111)
+        hourR = ((r06 >> 4) & 0b1) * 10 + (r06 & 0b1111)
+
+        hour = hourR << 8 | hourM << 4 | hourL
+        date = datetime.timedelta(hours=hour, minutes=minu, seconds=sec, milliseconds=sec100*10)
+        
+        return(absdate, date)
+
+    def get_battery(self):
+
+
+        ibus_adc = (self.ftdi.read_byte_data(self.addr_charger, 0x28) >> 1) * 2  
+        ibat_adc = (self.ftdi.read_byte_data(self.addr_charger, 0x2A) >> 2) * 4 
+        vbus_adc = (self.ftdi.read_byte_data(self.addr_charger, 0x2C) >> 2) * 3.97 / 1000
+        vpmid_adc= (self.ftdi.read_byte_data(self.addr_charger, 0x2E) >> 2) * 3.97 / 1000
+        vbat_adc = (self.ftdi.read_word_data(self.addr_charger, 0x30) >> 1) * 1.99 /1000  # VBAT ADC
+        vsys_adc = (self.ftdi.read_word_data(self.addr_charger, 0x32) >> 1) * 1.99 /1000 # VSYS ADC
+        tf_adc   = (self.ftdi.read_word_data(self.addr_charger, 0x34) >> 0) * 0.0961  # TF ADC
+        tdie_adc = (self.ftdi.read_word_data(self.addr_charger, 0x36) >> 0) * 0.5  # TDIE ADC
+
+        g_voltage = self.ftdi.read_word_data(self.addr_gauge, 0x08)
+        g_cur_avg = self.ftdi.read_word_data(self.addr_gauge, 0x0A)
+        g_cur_now = self.ftdi.read_word_data(self.addr_gauge, 0x10)
+        g_rem_cap = self.ftdi.read_word_data(self.addr_gauge, 0x04)
+        g_ful_cap = self.ftdi.read_word_data(self.addr_gauge, 0x06)
+        g_temp    = self.ftdi.read_word_data(self.addr_gauge, 0x0C)
+        g_state   = self.ftdi.read_word_data(self.addr_gauge, 0x02)
+
+
+        return {
+            'IBUS_ADC': ibus_adc,
+            'IBAT_ADC': ibat_adc,
+            'VBUS_ADC': vbus_adc,
+            'VPMID_ADC': vpmid_adc,
+            'VBAT_ADC': vbat_adc,
+            'VSYS_ADC': vsys_adc,
+            'TS_ADC': tf_adc,
+            'TDIE_ADC': tdie_adc
+        }, {
+            'VOLTAGE': g_voltage,
+            'CUR_AVG': g_cur_avg,
+            'CUR_NOW': g_cur_now,
+            'REM_CAP': g_rem_cap,
+            'FUL_CAP': g_ful_cap,
+            'TEMP': g_temp,
+            'STATE': g_state
+            
+        }
+
+    @pyqtSlot()
+    def get_airdos_status(self):
+        abstime, sys_date = self.get_time()
+        charger, gauge = self.get_battery()
+
+        data = self.basic_params.copy()
+        data.update({
+            'RTC': {
+                'sys_time': sys_date,
+                'abs_time': abstime
+            },
+            'CHARGER': charger,
+            'GAUGE': gauge
+        })
+
+
+        a,b = self.sht_read_sensor_data(self.addr_sht, self.temperature_cmd )
+        c,d = self.sht_read_sensor_data(self.addr_sht, self.humidity_cmd )
+
+
+        e,f = self.sht_read_sensor_data(self.addr_sht, [0x24, 0x0b] )
+
+        data['SHT'] = {
+            'temperature': a,
+            'temp': b,
+            'humidity': c,
+            'hub': d,
+            'a_t': e,
+            'a_h': f
+        }
+
+
+
+        a,b = self.sht_read_sensor_data(self.addr_an_sht, self.temperature_cmd )
+        c,d = self.sht_read_sensor_data(self.addr_an_sht, self.humidity_cmd )
+
+
+        e,f = self.sht_read_sensor_data(self.addr_an_sht, [0x24, 0x0b] )
+
+        data['ADC_SHT'] = {
+            'temperature': a,
+            'temp': b,
+            'humidity': c,
+            'hub': d,
+            'a_t': e,
+            'a_h': f
+        }
+
+        print("Posilam...", type(data))
+        print(data)
+        self.sendAirdosStatus.emit(data)    
         
 class HIDUARTCommunicationThread(QThread):
     connected = pyqtSignal(bool)
@@ -256,6 +878,7 @@ class AirdosConfigTab(QWidget):
 
         self.i2c_thread = HIDI2CCommunicationThread()
         self.i2c_thread.connected.connect(self.on_i2c_connected)  
+        self.i2c_thread.sendAirdosStatus.connect(self.on_airdos_status)
         self.i2c_thread.start()
 
         #self.uart_thread = HIDUARTCommunicationThread().start()
@@ -266,6 +889,7 @@ class AirdosConfigTab(QWidget):
     def on_i2c_connected(self, connected: bool = True):
         self.i2c_connect_button.setEnabled(not connected)
         self.i2c_disconnect_button.setEnabled(connected)
+        self.i2c_power_off_button.setEnabled(connected)
 
     def on_i2c_connect(self):
         pass
@@ -286,6 +910,34 @@ class AirdosConfigTab(QWidget):
     def on_mass_disconnect(self):
         pass
 
+    def on_airdos_status(self, status):
+        print("AIRDOS STATUS:")
+        print(status)
+
+
+        self.i2c_parameters_tree.clear()
+
+        def add_properties_to_tree(item, properties):
+            for key, value in properties.items():
+                if isinstance(value, dict):
+                    parent_item = QTreeWidgetItem([key])
+                    item.addChild(parent_item)
+                    add_properties_to_tree(parent_item, value)
+                else:
+                    child_item = QTreeWidgetItem([key, str(value)])
+                    item.addChild(child_item)
+
+        for key, value in status.items():
+            print(key, value)
+            if isinstance(value, dict):
+                parent_item = QTreeWidgetItem([key])
+                self.i2c_parameters_tree.addTopLevelItem(parent_item)
+                add_properties_to_tree(parent_item, value)
+            else:
+                self.i2c_parameters_tree.addTopLevelItem(QTreeWidgetItem([key, str(value)]))
+        self.i2c_parameters_tree.expandAll()
+
+
     def initUI(self):
         splitter = QSplitter(Qt.Horizontal)
         
@@ -294,25 +946,48 @@ class AirdosConfigTab(QWidget):
         i2c_layout.setAlignment(Qt.AlignTop)
         i2c_widget.setLayout(i2c_layout)
 
+        i2c_layout_row_1 = QHBoxLayout()
+
         self.i2c_connect_button = QPushButton("Connect")
         self.i2c_disconnect_button = QPushButton("Disconnect")
-        self.i2c_connect_button.clicked.connect(lambda: self.i2c_thread.connect(True))
-        self.i2c_disconnect_button.clicked.connect(lambda: self.i2c_thread.connect(False)) 
+        self.i2c_disconnect_button.disabled = True
+        self.i2c_connect_button.clicked.connect(lambda: self.i2c_thread.connectSlot(True))
+        self.i2c_disconnect_button.clicked.connect(lambda: self.i2c_thread.connectSlot(False)) 
         
-        i2c_layout.addWidget(self.i2c_connect_button)
-        i2c_layout.addWidget(self.i2c_disconnect_button)
+        self.i2c_power_off_button = QPushButton("Power off and Disconnect")
+        self.i2c_power_off_button.clicked.connect(lambda: self.i2c_thread.connectSlot(False, True))
+        self.i2c_power_off_button.disabled = True
         
+        i2c_layout_row_1.addWidget(self.i2c_connect_button)
+        i2c_layout_row_1.addWidget(self.i2c_disconnect_button)
+        i2c_layout_row_1.addWidget(self.i2c_power_off_button)
+        i2c_layout.addLayout(i2c_layout_row_1)
+
+        self.i2c_parameters_tree = QTreeWidget()
+        self.i2c_parameters_tree.setHeaderLabels(["Parameter", "Value"])
+        i2c_layout.addWidget(self.i2c_parameters_tree)
+
+        reload_button = QPushButton("Reload")
+        reload_button.clicked.connect(self.i2c_thread.get_airdos_status)
+        i2c_layout.addWidget(reload_button)
+
+
+
+
+
 
         uart_widget = QGroupBox("UART")
         uart_layout = QVBoxLayout()
         uart_layout.setAlignment(Qt.AlignTop)
         uart_widget.setLayout(uart_layout)
-        
+
         uart_connect_button = QPushButton("Connect")
         uart_disconnect_button = QPushButton("Disconnect")
         uart_layout.addWidget(uart_connect_button)
         uart_layout.addWidget(uart_disconnect_button)
-        
+
+
+
         data_memory_widget = QGroupBox("Data memory")
         data_memory_layout = QVBoxLayout()
         data_memory_layout.setAlignment(Qt.AlignTop)
