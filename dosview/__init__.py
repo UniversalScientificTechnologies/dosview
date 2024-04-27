@@ -23,6 +23,8 @@ import hid
 
 def parse_file(file_path):
 
+        print("Parser start ")
+
         metadata = {
             'log_runs_count': 0,
             'log_device_info': {}
@@ -112,32 +114,36 @@ def parse_file(file_path):
 
         df_metadata = pd.DataFrame()
         
-        try:
-            for index, row in df_log.iterrows():
-                first_column_value = row[0]
-                row_as_list = row.tolist()[2:]
-                
-                match first_column_value:
-                    case '$BATT':
-                        keys = ['time', 'voltage', 'current', 'capacity_remaining', 'capacity_full', 'temperature']
-                        bat = { k:float(v) for (k,v) in zip(keys, row_as_list[0:len(keys)])}
-                        #bat['current'] /= 1000.0
-                        #bat['voltage'] /= 1000.0
-                        df_metadata = pd.concat([df_metadata, pd.DataFrame([bat])], ignore_index=True)
-                        del bat
-                    case '$ENV':
-                        keys = ['time', 'temperature_0', 'humidity_0', 'temperature_1', 'humidity_1', 'temperature_2', 'pressure_3']
-                        env = { k:float(v) for (k,v) in zip(keys, row_as_list[0:len(keys)])}
-                        df_metadata = pd.concat([df_metadata, pd.DataFrame([env])], ignore_index=True)
-                        del env
-                    case '$HIST':
-                        pass
-                    case _:
-                        print('Unknown row', first_column_value)
-        except Exception as e:
-            print(e)
+        if True:
+            try:
+                for index, row in df_log.iterrows():
+                    first_column_value = row[0]
+                    row_as_list = row.tolist()[2:]
+                    
+                    match first_column_value:
+                        case '$BATT':
+                            keys = ['time', 'voltage', 'current', 'capacity_remaining', 'capacity_full', 'temperature']
+                            bat = { k:float(v) for (k,v) in zip(keys, row_as_list[0:len(keys)])}
+                            #bat['current'] /= 1000.0
+                            #bat['voltage'] /= 1000.0
+                            df_metadata = pd.concat([df_metadata, pd.DataFrame([bat])], ignore_index=True)
+                            del bat
+                        case '$ENV':
+                            keys = ['time', 'temperature_0', 'humidity_0', 'temperature_1', 'humidity_1', 'temperature_2', 'pressure_3']
+                            env = { k:float(v) for (k,v) in zip(keys, row_as_list[0:len(keys)])}
+                            df_metadata = pd.concat([df_metadata, pd.DataFrame([env])], ignore_index=True)
+                            del env
+                        case '$HIST':
+                            pass
+                        case _:
+                            print('Unknown row', first_column_value)
+                            
+                df_metadata['time'] = df_metadata['time'] - minimal_time
+            except Exception as e:
+                print(e)
             
-        df_metadata['time'] = df_metadata['time'] - minimal_time
+
+        print("File parsered ..")
 
         return [df_spectrum['time'], sums, hist, metadata, df_metadata]
 
@@ -198,8 +204,11 @@ class PlotCanvas(pg.GraphicsLayoutWidget):
         pen = pg.mkPen(color = "brown", width = 2)
 
         for key, value in self.telemetry_lines.items():
-            self.telemetry_lines[key] = plot_evolution.plot(self.data[4]['time']/60, self.data[4][key], 
+            try:
+                self.telemetry_lines[key] = plot_evolution.plot(self.data[4]['time']/60, self.data[4][key], 
                     pen=pen, name = key)
+            except:
+                pass
 
         plot_spectrum.setLogMode(x=True, y=True)
         plot_spectrum.showGrid(x=True, y=True)
@@ -293,7 +302,9 @@ class FT260HidDriver():
         Functionality flag: I2C_FUNC_SMBUS_WRITE_BYTE
         """
 
-        return None
+        payload = [0xD0, address, 0x06, 1, value]
+        self.device.write(payload)
+
 
     def read_byte(self, address):
         """
@@ -307,7 +318,7 @@ class FT260HidDriver():
 
         Functionality flag: I2C_FUNC_SMBUS_WRITE_BYTE
         """
-        return None
+        raise NotImplementedError
 
     def write_byte_data(self, address, register, value):
         """
@@ -469,7 +480,12 @@ class FT260HidDriver():
 
         More detail documentation is at: https://www.kernel.org/doc/Documentation/i2c/i2c-protocol
         """
-        raise NotImplementedError
+
+        payload = [0xc2, address, 0x06, length, 0]
+        self.device.write(payload)
+        data = self.device.read(0xde)
+
+        return data[2:data[1]+2]
 
     def write_i2c_block_data(self, address, register, value):
         """
@@ -679,6 +695,16 @@ class HIDI2CCommunicationThread(QThread):
         print(data)
         serial_number = (data[0] << 24) | (data[1] << 16) | (data[3] << 8) | data[4]
         return serial_number
+    
+    def set_i2c_direction_to_usb(self, usb = True):
+        # Přepnout I2C switch na I2C z USB
+
+        if usb:
+            # Do usb se to prepne tak, ze bit[0] a bit[2] jsou rozdilne hodnoty, bit[1] a bit[3] jsou read-only
+            self.ftdi.write_byte_data(self.addr_switch, 0x01, 0b011)
+        else:
+            # Do ATMEGA se to prepne tak, ze bit[0] a bit[2] maji stejne hodnoty hodnoty
+            self.ftdi.write_byte_data(self.addr_switch, 0x01, 0b0000)
 
     @pyqtSlot()
     def connectSlot(self, state = True, power_off = False):
@@ -693,8 +719,10 @@ class HIDI2CCommunicationThread(QThread):
 
             self.ftdi = FT260HidDriver(0, self.dev)
 
+
             # Přepnout I2C switch na I2C z USB
-            self.ftdi.write_byte_data(self.addr_switch, 0x01, 0x03)
+            self.set_i2c_direction_to_usb(True)
+
 
             # self.ftdi.write_byte_data(self.addr_charger, 0x26, 0b10111000) # ????? 
             self.ftdi.write_byte_data(self.addr_charger, 0x18, 0b00011000)
@@ -717,15 +745,19 @@ class HIDI2CCommunicationThread(QThread):
             print(hex(sn))
             self.basic_params['sn_ustsipin'] = hex(sn)
 
+            self.set_i2c_direction_to_usb(False)
+
+
             self.connected.emit(True)
         
         else:
             
+            self.set_i2c_direction_to_usb(True)
+
             # Vypnout nabijecku pokud je pozadovano
             if power_off:
                 self.ftdi.write_byte_data(self.addr_charger, 0x18, 0b00011010)
-
-            self.ftdi.write_byte_data(self.addr_switch, 0x01, 0x04)   # vratit I2C sbernici do puvodniho stavu 
+            self.set_i2c_direction_to_usb(False)
 
             self.dev.close()
             self.dev = None
@@ -798,6 +830,9 @@ class HIDI2CCommunicationThread(QThread):
 
     @pyqtSlot()
     def get_airdos_status(self):
+
+        self.set_i2c_direction_to_usb(True)
+
         abstime, sys_date = self.get_time()
         charger, gauge = self.get_battery()
 
@@ -811,42 +846,57 @@ class HIDI2CCommunicationThread(QThread):
             'GAUGE': gauge
         })
 
-
-        a,b = self.sht_read_sensor_data(self.addr_sht, self.temperature_cmd )
-        c,d = self.sht_read_sensor_data(self.addr_sht, self.humidity_cmd )
-
-
-        e,f = self.sht_read_sensor_data(self.addr_sht, [0x24, 0x0b] )
+        a,b = self.sht_read_sensor_data(self.addr_sht, [0x24, 0x0b] )
 
         data['SHT'] = {
             'temperature': a,
-            'temp': b,
-            'humidity': c,
-            'hub': d,
-            'a_t': e,
-            'a_h': f
+            'humidity': b
         }
 
+        a, b = self.sht_read_sensor_data(self.addr_an_sht, [0x24, 0x0b] )
 
-
-        a,b = self.sht_read_sensor_data(self.addr_an_sht, self.temperature_cmd )
-        c,d = self.sht_read_sensor_data(self.addr_an_sht, self.humidity_cmd )
-
-
-        e,f = self.sht_read_sensor_data(self.addr_an_sht, [0x24, 0x0b] )
-
-        data['ADC_SHT'] = {
+        data['AIRDOS_SHT'] = {
             'temperature': a,
-            'temp': b,
-            'humidity': c,
-            'hub': d,
-            'a_t': e,
-            'a_h': f
+            'humidity': b
         }
 
+
+        data['ALTIMET'] = {}
+        data['ALTIMET']['calcoef'] = []
+        for value in range(0xa0, 0xae, 2):
+            self.ftdi.write_byte(self.addr_altimet, value)
+            # time.sleep(0.2)
+            # self.ftdi.write_byte(self.addr_altimet, 0)
+            time.sleep(0.1)
+            dat = self.ftdi.read_i2c_block(self.addr_altimet, 2)
+            time.sleep(0.1)
+            dat = dat[0] << 8 | dat[1]
+            data['ALTIMET']['calcoef'].append(dat)
+        time.sleep(0.2)
+            
+        self.ftdi.write_byte(self.addr_altimet, 0b01001000)
+        time.sleep(0.2)
+        self.ftdi.write_byte(self.addr_altimet, 0)
+        time.sleep(0.2)
+        hum = self.ftdi.read_i2c_block(self.addr_altimet, 3)
+        time.sleep(0.2)
+
+        self.ftdi.write_byte(self.addr_altimet, 0b01011000)
+        time.sleep(0.2)
+        self.ftdi.write_byte(self.addr_altimet, 0)
+        time.sleep(0.2)
+        temp = self.ftdi.read_i2c_block(self.addr_altimet, 3)
+        time.sleep(0.2)
+
+        data['ALTIMET'].update({
+            'altitude': hum[0] << 16 | hum[1] << 8 | hum[2],
+            'temperature': temp[0] << 16 | temp[1] << 8 | temp[2]
+        })
+
+        self.set_i2c_direction_to_usb(False)
         print("Posilam...", type(data))
         print(data)
-        self.sendAirdosStatus.emit(data)    
+        self.sendAirdosStatus.emit(data)  
         
 class HIDUARTCommunicationThread(QThread):
     connected = pyqtSignal(bool)

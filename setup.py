@@ -32,7 +32,7 @@ class PostInstallCommand(install):
 
 setup(
     name='dosview',
-    version=f'0.1.9',
+    version=f'0.1.10',
     description='A .dos file viewer', 
     long_description=long_description,
     long_description_content_type='text/markdown',
@@ -54,5 +54,8 @@ setup(
         'Programming Language :: Python :: 3.7',
         'Programming Language :: Python :: 3.8',
         'Programming Language :: Python :: 3.9',
+        'Programming Language :: Python :: 3.10',
+        'Programming Language :: Python :: 3.11',
+        'Programming Language :: Python :: 3.12',
     ],
 )
