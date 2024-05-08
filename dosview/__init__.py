@@ -20,8 +20,10 @@ from PyQt5.QtGui import *
 from PyQt5.QtWidgets import *
 
 import hid
+import numpy as np
+import os
 
-def parse_file(file_path):
+def parse_file_old(file_path):
 
         print("Parser start ")
 
@@ -147,6 +149,75 @@ def parse_file(file_path):
 
         return [df_spectrum['time'], sums, hist, metadata, df_metadata]
 
+
+
+def parse_file(file_path):
+    start_time = time.time()
+    print("Parser start")
+
+    metadata = {
+        'log_runs_count': 0,
+        'log_device_info': {},
+        'log_info': {}
+    }
+    df_lines = []
+    df_metadata = []
+
+    with open(file_path, 'r') as file:
+        
+        for line in file:
+            parts = line.strip().split(",")
+            # Use match-case to handle different types of lines
+            match parts[0]:
+                case "$HIST":
+                    df_lines.append(parts[1:])
+                case "$DOS":
+                    metadata['log_runs_count'] += 1
+                    metadata['log_device_info']['DOS'] = {
+                        "type": parts[0],
+                        "hw-model": parts[1],
+                        "fw-version": parts[2],
+                        "fw-build_info": parts[5],
+                        "fw-commit": parts[4],
+                        'hw-sn': parts[6].strip(),
+                        'eeprom': parts[3].strip(),
+                    }
+                case "$DIG" | "$ADC" as device_type:
+                    clean_type = device_type.strip('$')
+                case "$ENV" | "$BATT":
+                    df_metadata.append(parts)
+                case _:
+                    print(f'Unknown row type: {parts[0]}')
+
+
+
+    np_spectrum = np.array(df_lines, dtype=float)
+    time_column = np_spectrum[:, 0]
+    np_spectrum = np_spectrum[:, 8:]
+
+    sums = np.sum(np_spectrum[:, 1:], axis=1)
+    hist = np.sum(np_spectrum[:, 1:], axis=0)
+
+    minimal_time = time_column.min()
+    maximal_time = time_column.max()
+    duration = maximal_time - minimal_time
+    
+    df_metadata = pd.DataFrame(df_metadata, columns=range(9))
+    
+    metadata['log_info'].update({
+        'log_type': 'xDOS_SPECTRAL',
+        'log_type_version': '1.0',
+        'internal_time_min': minimal_time,
+        'internal_time_max': maximal_time,
+        'log_duration': duration,
+        'spectral_count': sums.shape,
+        'channels': hist.shape,
+    })
+
+    print("Log file parsed in ", time.time()-start_time, " seconds")
+
+    return [time_column, sums, hist, metadata, None]
+
 class LoadDataThread(QThread):
     data_loaded = pyqtSignal(list)
 
@@ -170,28 +241,31 @@ class PlotCanvas(pg.GraphicsLayoutWidget):
                                 'voltage': None, 'current': None, 'capacity_remaining': None, 'capacity_full': None, 'temperature': None}
 
     def plot(self, data):
+        start_time = time.time()
 
         self.data = data
         window_size = 20
 
         self.clear()
+
         plot_evolution = self.addPlot(row=0, col=0)
         plot_spectrum = self.addPlot(row=1, col=0)
+
 
         plot_evolution.showGrid(x=True, y=True)
         plot_evolution.setLabel("left",  "Total count per exposition", units="#")
         plot_evolution.setLabel("bottom","Time", units="min")
 
-        time_axis = (self.data[0]/60).to_list()
-        plot_evolution.plot(time_axis, self.data[1].to_list(),
+        time_axis = self.data[0]/60
+        plot_evolution.plot(time_axis, self.data[1],
                         symbol ='o', symbolPen ='pink', name ='Channel', pen=None)
         
+
         pen = pg.mkPen(color="r", width=3)
-        rolling_avg = self.data[1].rolling(window=window_size).mean().to_list()
-        plot_evolution.plot(time_axis, rolling_avg, pen=pen)
+        rolling_avg = np.convolve(self.data[1], np.ones(window_size)/window_size, mode='valid')
+        plot_evolution.plot(time_axis[window_size-1:], rolling_avg, pen=pen)
 
-
-        ev_data = self.data[2].to_list()
+        ev_data = self.data[2]
         plot_spectrum.plot(range(len(ev_data)), ev_data, 
                         pen="r", symbol='x', symbolPen = 'g',
                         symbolBrush = 0.2, name = "Energy")
@@ -199,19 +273,10 @@ class PlotCanvas(pg.GraphicsLayoutWidget):
         plot_spectrum.setLabel("bottom", "Channel", units="#")
 
 
-        plot_evolution.setLabel("right", "Pressure/Temp/Voltage/Current", units="units")
-        plot_evolution.showAxis('right')
-        pen = pg.mkPen(color = "brown", width = 2)
-
-        for key, value in self.telemetry_lines.items():
-            try:
-                self.telemetry_lines[key] = plot_evolution.plot(self.data[4]['time']/60, self.data[4][key], 
-                    pen=pen, name = key)
-            except:
-                pass
-
         plot_spectrum.setLogMode(x=True, y=True)
         plot_spectrum.showGrid(x=True, y=True)
+
+        print("PLOT DURATION ... ", time.time()-start_time)
 
 
     def telemetry_toggle(self, key, value):
@@ -1022,10 +1087,6 @@ class AirdosConfigTab(QWidget):
         i2c_layout.addWidget(reload_button)
 
 
-
-
-
-
         uart_widget = QGroupBox("UART")
         uart_layout = QVBoxLayout()
         uart_layout.setAlignment(Qt.AlignTop)
@@ -1035,8 +1096,6 @@ class AirdosConfigTab(QWidget):
         uart_disconnect_button = QPushButton("Disconnect")
         uart_layout.addWidget(uart_connect_button)
         uart_layout.addWidget(uart_disconnect_button)
-
-
 
         data_memory_widget = QGroupBox("Data memory")
         data_memory_layout = QVBoxLayout()
@@ -1058,24 +1117,12 @@ class AirdosConfigTab(QWidget):
         self.setLayout(layout)
 
 
-class App(QMainWindow):
-    def __init__(self, file_path):
+class PlotTab(QWidget):
+    def __init__(self):
         super().__init__()
-        self.left = 100
-        self.top = 100
-        self.title = 'dosview'
-        self.width = 640
-        self.height = 400
-        self.file_path = file_path
         self.initUI()
-
+    
     def initUI(self):
-        self.setWindowTitle(self.title)
-        self.setGeometry(self.left, self.top, self.width, self.height)
-        self.setWindowIcon(QIcon('media/icon_ust.png'))
-        
-
-        self.plot_canvas = PlotCanvas(self, file_path=self.file_path)
         
         self.properties_tree = QTreeWidget()
         self.properties_tree.setColumnCount(2)
@@ -1095,19 +1142,120 @@ class App(QMainWindow):
 
         self.logView_splitter = QSplitter(Qt.Horizontal)
         self.logView_splitter.addWidget(self.left_panel)
-        self.logView_splitter.addWidget(self.plot_canvas)
+        #self.logView_splitter.addWidget(QWidget())
         self.logView_splitter.setSizes([1, 9])
         sizes = self.logView_splitter.sizes()
-        sizes[0] = int(sizes[1] * 0.1)
-        self.logView_splitter.setSizes(sizes)
+        #sizes[0] = int(sizes[1] * 0.1)
+        #self.logView_splitter.setSizes(sizes)
 
-        tab_widget = QTabWidget()
-        tab_widget.addTab(self.logView_splitter, "Log View")
-        self.airdos_config = AirdosConfigTab()
-        tab_widget.addTab(self.airdos_config, "Airdos control")
+        layout = QVBoxLayout()
+        layout.addWidget(self.logView_splitter)
+        self.setLayout(layout)
+    
 
-        tab_widget.setCurrentIndex(0)
-        self.setCentralWidget(tab_widget)
+    def open_file(self, file_path):
+        self.file_path = file_path
+        self.plot_canvas = PlotCanvas(self, file_path=self.file_path)
+        self.logView_splitter.addWidget(self.plot_canvas)
+
+        self.start_data_loading()
+
+    def start_data_loading(self):
+        self.load_data_thread = LoadDataThread(self.file_path)
+        self.load_data_thread.data_loaded.connect(self.on_data_loaded)
+        self.load_data_thread.start()
+
+    def on_data_loaded(self, data):
+        print("Data are fully loaded...")
+        self.plot_canvas.plot(data)
+        print("After plot data canvas")
+        
+        self.properties_tree.clear()
+
+        def add_properties_to_tree(item, properties):
+           for key, value in properties.items():
+               if isinstance(value, dict):
+                   parent_item = QTreeWidgetItem([key])
+                   item.addChild(parent_item)
+                   add_properties_to_tree(parent_item, value)
+               else:
+                   child_item = QTreeWidgetItem([key, str(value)])
+                   item.addChild(child_item)
+
+        metadata = data[3]
+        for key, value in metadata.items():
+           if isinstance(value, dict):
+               parent_item = QTreeWidgetItem([key])
+               self.properties_tree.addTopLevelItem(parent_item)
+               add_properties_to_tree(parent_item, value)
+           else:
+               self.properties_tree.addTopLevelItem(QTreeWidgetItem([key, str(value)]))
+        
+        self.datalines_tree.clear()
+        dataline_options = ['temperature_0', 'humidity_0', 'temperature_1', 'humidity_1', 'temperature_2', 'pressure_3', 'voltage', 'current', 'capacity_remaining', 'temperature']
+        for option in dataline_options:
+           child_item = QTreeWidgetItem([option])
+           child_item.setCheckState(0, Qt.Checked)
+           self.datalines_tree.addTopLevelItem(child_item)
+
+        self.datalines_tree.itemChanged.connect(lambda item, state: self.plot_canvas.telemetry_toggle(item.text(0), item.checkState(0) == Qt.Checked))
+        self.datalines_tree.setMaximumHeight(self.datalines_tree.sizeHintForRow(0) * (self.datalines_tree.topLevelItemCount()+4))
+
+        self.properties_tree.expandAll()
+
+
+class App(QMainWindow):
+    def __init__(self, args):
+        super().__init__()
+        self.args = args
+        self.left = 100
+        self.top = 100
+        self.title = 'dosview'
+        self.width = 640
+        self.height = 400
+        self.file_path = args.file_path
+        self.initUI()
+
+        self.plot_tab = None
+        self.airdos_tab = None
+
+    def openPlotTab(self, file_path = None):
+        plot_tab = PlotTab()
+        if not file_path:
+            file_path = self.args.file_path
+        print("Oteviram log.. ", file_path)
+        
+        plot_tab.open_file(file_path)
+        file_name = os.path.basename(file_path)
+        
+        self.tab_widget.addTab(plot_tab, f"{file_name}")
+        self.tab_widget.setCurrentIndex(self.tab_widget.count() - 1)
+
+    
+    def openAirdosTab(self):
+        airdos_tab = AirdosConfigTab()
+        self.tab_widget.addTab(airdos_tab, "Airdos control")
+        self.tab_widget.setCurrentIndex(self.tab_widget.count() - 1)
+
+
+    def initUI(self):
+        self.setWindowTitle(self.title)
+        self.setGeometry(self.left, self.top, self.width, self.height)
+        self.setWindowIcon(QIcon('media/icon_ust.png'))
+        
+        self.tab_widget = QTabWidget()
+        self.setCentralWidget(self.tab_widget)
+
+        if self.args.file_path:
+            print("Oteviram zalozku s logem")
+            self.openPlotTab()
+        
+        if self.args.airdos:
+            print("Oteviram zalozku s airdosem")
+            self.openAirdosTab()
+
+        self.tab_widget.setCurrentIndex(0)
+        self.tab_widget.setTabsClosable(True)
 
         bar = self.menuBar()
         file = bar.addMenu("&File")
@@ -1117,6 +1265,13 @@ class App(QMainWindow):
         open.triggered.connect(self.open_new_file)
         
         file.addAction(open)
+
+
+        tools = bar.addMenu("&Tools")
+        tool_airdosctrl = QAction("AirdosControl", self)
+        #tool_airdosctrl.setCheckable(True)
+        tool_airdosctrl.triggered.connect(self.action_switch_airdoscontrol)
+        tools.addAction(tool_airdosctrl)
 
 
         help = bar.addMenu("&Help")
@@ -1138,71 +1293,49 @@ class App(QMainWindow):
 
 
         self.setWindowTitle(f"dosview - {self.file_path}")
-        self.start_data_loading()
         self.show()
 
+
+    def action_switch_airdoscontrol(self):
+        print("Switching to Airdos control tab")
+
+        if not self.airdos_tab:
+            self.airdos_tab = AirdosConfigTab()
+            self.tab_widget.addTab(self.airdos_tab, "Airdos control")
+        self.statusBar.showMessage("Airdos control tab opened")
 
     def about(self):
         message = QMessageBox.about(self, "About dosview", "dosview is a simple tool to visualize data from Universal Scientific Technologies's")
 
 
-    def start_data_loading(self):
-        self.load_data_thread = LoadDataThread(self.file_path)
-        self.load_data_thread.data_loaded.connect(self.on_data_loaded)
-        self.load_data_thread.start()
-
-    def on_data_loaded(self, data):
-        print("Data are fully loaded...")
-        self.plot_canvas.plot(data)
-        
-        self.properties_tree.clear()
-
-        def add_properties_to_tree(item, properties):
-            for key, value in properties.items():
-                if isinstance(value, dict):
-                    parent_item = QTreeWidgetItem([key])
-                    item.addChild(parent_item)
-                    add_properties_to_tree(parent_item, value)
-                else:
-                    child_item = QTreeWidgetItem([key, str(value)])
-                    item.addChild(child_item)
-
-        metadata = data[3]
-        for key, value in metadata.items():
-            if isinstance(value, dict):
-                parent_item = QTreeWidgetItem([key])
-                self.properties_tree.addTopLevelItem(parent_item)
-                add_properties_to_tree(parent_item, value)
-            else:
-                self.properties_tree.addTopLevelItem(QTreeWidgetItem([key, str(value)]))
-        self.datalines_tree.clear()
-        dataline_options = ['temperature_0', 'humidity_0', 'temperature_1', 'humidity_1', 'temperature_2', 'pressure_3', 'voltage', 'current', 'capacity_remaining', 'temperature']
-        for option in dataline_options:
-            child_item = QTreeWidgetItem([option])
-            child_item.setCheckState(0, Qt.Checked)
-            self.datalines_tree.addTopLevelItem(child_item)
-
-        self.datalines_tree.itemChanged.connect(lambda item, state: self.plot_canvas.telemetry_toggle(item.text(0), item.checkState(0) == Qt.Checked))
-        self.datalines_tree.setMaximumHeight(self.datalines_tree.sizeHintForRow(0) * (self.datalines_tree.topLevelItemCount()+4))
-
-        self.properties_tree.expandAll()
 
     def open_new_file(self, flag):
         print("Open new file")
 
-        dlg = QFileDialog(self, "Projects", options=None)
+        dlg = QFileDialog(self, "Projects" )
         dlg.setFileMode(QFileDialog.ExistingFile)
 
         fn = dlg.getOpenFileName()
         print(fn)
+        self.openPlotTab(fn[0])
 
         dlg.deleteLater()
         
 
 def main():
     parser = argparse.ArgumentParser(description='Process some integers.')
-    parser.add_argument('file_path', type=str, help='Path to the input file', default=None, nargs='?')
+    parser.add_argument('file_path', type=str, help='Path to the input file', default=False, nargs='?')
+    parser.add_argument('--airdos', action='store_true', help='Enable airdos control tab')
+    parser.add_argument('--no_gui', action='store_true', help='Disable GUI and run in headless mode')
+    parser.add_argument('--version', action='version', version='%(prog)s version')
+
     args = parser.parse_args()
+
+    if args.version:
+        print("dosview version xx")
+        sys.exit(0)
+
+    print(args)
 
     if not args.file_path:
         pass
@@ -1214,7 +1347,7 @@ def main():
 
 
     app = QApplication(sys.argv)
-    ex = App(args.file_path)
+    ex = App(args)
     sys.exit(app.exec_())
 
 if __name__ == '__main__':
