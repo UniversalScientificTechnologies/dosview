@@ -19,14 +19,17 @@ class PostInstallCommand(install):
 
         install.run(self)
         
-        if not os.path.exists('/usr/local/share/applications'):
-            os.makedirs('/usr/local/share/applications')
-        copyfile('dosview.desktop', '/usr/local/share/applications/dosview.desktop')
-        
-        if not os.path.exists('/usr/local/share/icons'):
-            os.makedirs('/usr/local/share/icons')
-        copyfile('media/icon_ust.png', '/usr/local/share/icons/icon_ust.png')
-
+        try:
+            if not os.path.exists('/usr/local/share/applications'):
+                os.makedirs('/usr/local/share/applications')
+            copyfile('dosview.desktop', '/usr/local/share/applications/dosview.desktop')
+            
+            if not os.path.exists('/usr/local/share/icons'):
+                os.makedirs('/usr/local/share/icons')
+            copyfile('media/icon_ust.png', '/usr/local/share/icons/icon_ust.png')
+        except Exception as e:
+            print(f"Error: {e}")
+            print("Dosview intsallation script failed .. ")
 # Get the commit hash
 #commit_hash = subprocess.check_output(['git', 'rev-parse', 'HEAD']).decode().strip()
 
