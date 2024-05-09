@@ -29,6 +29,15 @@ classifiers = [
 ]
 dynamic = ["version"]
 
+dependencies = [
+    "setuptools",
+    "matplotlib",
+    "numpy",
+    "pandas",
+    "pyqt5",
+    "pyqtgraph",
+    "ft260",
+]
 
 [tool.setuptools.dynamic]
 long_description_content_type = "text/markdown"
@@ -49,13 +58,3 @@ github = "https://github.com/UniversalScientificTechnologies/dosview/"
 issues = "https://github.com/UniversalScientificTechnologies/dosview/issues"
 doccumentation = "https://docs.dos.ust.cz/dosview/"
 
-[project.dependencies]
-requires = [
-    "setuptools",
-    "matplotlib",
-    "numpy",
-    "pandas",
-    "pyqt5",
-    "pyqtgraph",
-    "ft260",
-]
