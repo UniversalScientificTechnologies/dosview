@@ -44,6 +44,7 @@ setup(
             'dosview = dosview:main',
         ],
     },
+    include_package_data=True,
     install_requires=required,
     cmdclass={
         'install': PostInstallCommand,
