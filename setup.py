@@ -34,7 +34,7 @@ class PostInstallCommand(install):
 setup(
     name='dosview',
     #version= dosview.__version__,
-    version="0.0.0",
+    version="0.1.13",
     description='A .dos file viewer', 
     long_description=long_description,
     long_description_content_type='text/markdown',
