@@ -23,6 +23,8 @@ import hid
 import numpy as np
 import os
 
+from .version import __version__
+
 def parse_file_old(file_path):
 
         print("Parser start ")
@@ -1327,12 +1329,12 @@ def main():
     parser.add_argument('file_path', type=str, help='Path to the input file', default=False, nargs='?')
     parser.add_argument('--airdos', action='store_true', help='Enable airdos control tab')
     parser.add_argument('--no_gui', action='store_true', help='Disable GUI and run in headless mode')
-    parser.add_argument('--version', action='version', version='%(prog)s version')
+    parser.add_argument('--version', action='store_true', help='Print version and exit')
 
     args = parser.parse_args()
 
     if args.version:
-        print("dosview version xx")
+        print(f"dosview version {__version__}")
         sys.exit(0)
 
     print(args)

@@ -1,0 +1,63 @@
+[build-system]
+requires = ["setuptools", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "dosview"
+#version = "0.1.12"
+description = "A .dos file viewer"
+readme = "README.md"
+license = { file="LICENSE" }
+authors = [
+  {name = "Roman Dvorak", email = "dvorakroman@ust.cz"}
+]
+maintainers = [
+  {name = "Roman Dvorak", email = "dvorakroman@ust.cz"}
+]
+requires-python = ">=3.6"
+keywords = "UST, dosimeters, airdos, labdos, log, dos, viewer, file"
+
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3.6",
+    "Programming Language :: Python :: 3.7",
+    "Programming Language :: Python :: 3.8",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+]
+dynamic = ["version"]
+
+
+[tool.setuptools.dynamic]
+long_description_content_type = "text/markdown"
+version = {attr="dosview.version.__version__"}
+
+[tool.setuptools.package-data]
+'/usr/local/share/applications' = ['dosview.desktop']
+'/usr/local/share/icons' = ['media/icon_ust.png']
+
+
+[project.scripts]
+dosview = "dosview:main"
+
+[project.urls]
+homepage = "https://docs.dos.ust.cz/dosview/"
+repository = "https://github.com/UniversalScientificTechnologies/dosview/"
+github = "https://github.com/UniversalScientificTechnologies/dosview/"
+issues = "https://github.com/UniversalScientificTechnologies/dosview/issues"
+doccumentation = "https://docs.dos.ust.cz/dosview/"
+
+[project.dependencies]
+requires = [
+    "setuptools",
+    "matplotlib",
+    "numpy",
+    "pandas",
+    "pyqt5",
+    "pyqtgraph",
+    "ft260",
+]

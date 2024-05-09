@@ -4,7 +4,7 @@ from shutil import copyfile
 import os
 import subprocess
 
-# Read requirements.txt
+#Read requirements.txt
 with open('requirements.txt') as f:
     required = f.read().splitlines()
 
@@ -30,9 +30,11 @@ class PostInstallCommand(install):
 # Get the commit hash
 #commit_hash = subprocess.check_output(['git', 'rev-parse', 'HEAD']).decode().strip()
 
+
 setup(
     name='dosview',
-    version=f'0.1.11',
+    #version= dosview.__version__,
+    version="0.0.0",
     description='A .dos file viewer', 
     long_description=long_description,
     long_description_content_type='text/markdown',
