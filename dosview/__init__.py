@@ -25,133 +25,6 @@ import os
 
 from .version import __version__
 
-def parse_file_old(file_path):
-
-        print("Parser start ")
-
-        metadata = {
-            'log_runs_count': 0,
-            'log_device_info': {}
-        }
-        max_size = 0
-
-        with open(file_path, 'r') as file:
-            for line in file:
-                parts_size = len(line.split(","))
-                if parts_size > max_size: max_size = parts_size
-
-                for line in file:
-                    parts_size = len(line.split(","))
-                    if parts_size > max_size: max_size = parts_size
-
-                    parts = line.split(",")
-                    match parts[0]:
-                        case "$HIST":
-                            pass
-                            # spec_mod = SpectrumData()
-                            # spec_mod.record = instance
-                            # spec_mod.spectrum = parts[8:]
-                            # spec_mod.integration = 10
-                            # spec_mod.time = parts[2]
-                            # spec_mod.save()
-                        case "$DOS":
-                            print("DOS", line)
-                            metadata['log_runs_count'] += 1
-                            metadata['log_device_info']['DOS'] = {
-                                "type": parts[0],
-                                "hw-model": parts[1],
-                                "fw-version": parts[2],
-                                "fw-build_info": parts[5],
-                                "fw-commit": parts[4],
-                                'hw-sn': parts[6].strip()
-                            }
-                        case "$DIG":
-                            print("DIG", line)
-                            metadata['log_device_info']['DIG'] = {
-                                "type": parts[0],
-                                "hw-model": parts[1],
-                                "hw-sn": parts[2],
-                                'eeprom': parts[3].strip()
-                            }
-                        case "$ADC":
-                            print("ADC", line)
-                            metadata['log_device_info']['ADC'] = {
-                                "type": parts[0],
-                                "hw-model": parts[1],
-                                "hw-sn": parts[2],
-                                'eeprom': parts[3].strip()
-                            }
-                        case _:
-                            pass
-
-        df_log = pd.read_csv(file_path, sep = ',', header = None, names=range(max_size), low_memory=False)
-        data_types = df_log[0].unique().tolist()
-
-        df_spectrum = df_log [df_log[0] == '$HIST'] 
-        df_spectrum = df_spectrum.drop(columns=[0, 1, 3, 4, 5, 6, 7])
-
-        new_columns = ['time'] + list(range(df_spectrum.shape[1] - 1))
-        df_spectrum.columns = new_columns
-
-        df_spectrum['time'] = df_spectrum['time'].astype(float)
-        minimal_time = df_spectrum['time'].min()
-        duration = df_spectrum['time'].max() - df_spectrum['time'].min()
-
-        metadata['log_info'] = {}
-        metadata['log_info']['log_type'] = 'xDOS_SPECTRAL'
-        metadata['log_info']['log_type_version'] = '1.0'
-        metadata['log_info']['internal_time_min'] = df_spectrum['time'].min()
-        metadata['log_info']['internal_time_max'] = df_spectrum['time'].max()
-        metadata['log_info']['log_duration'] = float(duration)
-        metadata['log_info']['spectral_count'] = df_spectrum.shape[0]
-        metadata['log_info']['channels'] = df_spectrum.shape[1] - 1
-        metadata['log_info']['types'] = data_types
-        metadata['log_info']['telemetry_values'] = []
-
-        df_spectrum['time'] = df_spectrum['time'] - df_spectrum['time'].min()
-
-        time = df_spectrum['time'].to_list()
-        sums = df_spectrum.drop('time', axis=1).sum(axis=1) #.div(total_time)
-
-        hist = df_spectrum.drop('time', axis=1).sum(axis=0)
-
-
-        df_metadata = pd.DataFrame()
-        
-        if True:
-            try:
-                for index, row in df_log.iterrows():
-                    first_column_value = row[0]
-                    row_as_list = row.tolist()[2:]
-                    
-                    match first_column_value:
-                        case '$BATT':
-                            keys = ['time', 'voltage', 'current', 'capacity_remaining', 'capacity_full', 'temperature']
-                            bat = { k:float(v) for (k,v) in zip(keys, row_as_list[0:len(keys)])}
-                            #bat['current'] /= 1000.0
-                            #bat['voltage'] /= 1000.0
-                            df_metadata = pd.concat([df_metadata, pd.DataFrame([bat])], ignore_index=True)
-                            del bat
-                        case '$ENV':
-                            keys = ['time', 'temperature_0', 'humidity_0', 'temperature_1', 'humidity_1', 'temperature_2', 'pressure_3']
-                            env = { k:float(v) for (k,v) in zip(keys, row_as_list[0:len(keys)])}
-                            df_metadata = pd.concat([df_metadata, pd.DataFrame([env])], ignore_index=True)
-                            del env
-                        case '$HIST':
-                            pass
-                        case _:
-                            print('Unknown row', first_column_value)
-                            
-                df_metadata['time'] = df_metadata['time'] - minimal_time
-            except Exception as e:
-                print(e)
-            
-
-        print("File parsered ..")
-
-        return [df_spectrum['time'], sums, hist, metadata, df_metadata]
-
-
 
 def parse_file(file_path):
     start_time = time.time()
@@ -192,7 +65,6 @@ def parse_file(file_path):
                     print(f'Unknown row type: {parts[0]}')
 
 
-
     np_spectrum = np.array(df_lines, dtype=float)
     time_column = np_spectrum[:, 0]
     np_spectrum = np_spectrum[:, 8:]
@@ -204,7 +76,7 @@ def parse_file(file_path):
     maximal_time = time_column.max()
     duration = maximal_time - minimal_time
     
-    df_metadata = pd.DataFrame(df_metadata, columns=range(9))
+    #df_metadata = pd.DataFrame(df_metadata, columns=range(9))
     
     metadata['log_info'].update({
         'log_type': 'xDOS_SPECTRAL',
@@ -230,7 +102,6 @@ class LoadDataThread(QThread):
     def run(self):
         data = parse_file(self.file_path)
         self.data_loaded.emit(data)
-
 
 
 
@@ -1145,10 +1016,8 @@ class PlotTab(QWidget):
         self.logView_splitter = QSplitter(Qt.Horizontal)
         self.logView_splitter.addWidget(self.left_panel)
         #self.logView_splitter.addWidget(QWidget())
-        self.logView_splitter.setSizes([1, 9])
-        sizes = self.logView_splitter.sizes()
-        #sizes[0] = int(sizes[1] * 0.1)
-        #self.logView_splitter.setSizes(sizes)
+        
+        
 
         layout = QVBoxLayout()
         layout.addWidget(self.logView_splitter)
@@ -1159,6 +1028,11 @@ class PlotTab(QWidget):
         self.file_path = file_path
         self.plot_canvas = PlotCanvas(self, file_path=self.file_path)
         self.logView_splitter.addWidget(self.plot_canvas)
+
+        self.logView_splitter.setSizes([1, 9])
+        sizes = self.logView_splitter.sizes()
+        sizes[0] = int(sizes[1] * 0.1)
+        self.logView_splitter.setSizes(sizes)
 
         self.start_data_loading()
 
@@ -1221,6 +1095,14 @@ class App(QMainWindow):
         self.plot_tab = None
         self.airdos_tab = None
 
+    def updateStackedWidget(self):
+        print("Updating stacked widget")
+        print(self.tab_widget.count())
+        if self.tab_widget.count():
+            self.stacked_container.setCurrentIndex(1)
+        else:
+            self.stacked_container.setCurrentIndex(0)
+
     def openPlotTab(self, file_path = None):
         plot_tab = PlotTab()
         if not file_path:
@@ -1232,21 +1114,34 @@ class App(QMainWindow):
         
         self.tab_widget.addTab(plot_tab, f"{file_name}")
         self.tab_widget.setCurrentIndex(self.tab_widget.count() - 1)
+        self.updateStackedWidget()
 
     
     def openAirdosTab(self):
         airdos_tab = AirdosConfigTab()
         self.tab_widget.addTab(airdos_tab, "Airdos control")
         self.tab_widget.setCurrentIndex(self.tab_widget.count() - 1)
+        self.updateStackedWidget()
 
+
+    def blank_page(self):
+        # This is widget for blank page
+        # When no tab is opened
+        widget = QWidget()
+        layout = QVBoxLayout()
+        label = QLabel("No tab is opened yet. Open a file or enable airdos control.", alignment=Qt.AlignCenter)
+        layout.addWidget(label)
+        widget.setLayout(layout)
+        return widget
 
     def initUI(self):
         self.setWindowTitle(self.title)
         self.setGeometry(self.left, self.top, self.width, self.height)
         self.setWindowIcon(QIcon('media/icon_ust.png'))
         
+
         self.tab_widget = QTabWidget()
-        self.setCentralWidget(self.tab_widget)
+
 
         if self.args.file_path:
             print("Oteviram zalozku s logem")
@@ -1293,18 +1188,17 @@ class App(QMainWindow):
         self.setStatusBar(self.statusBar)
         self.statusBar.showMessage("Welcome to dosview")
 
+        self.stacked_container = QStackedWidget()
+        self.stacked_container.addWidget(self.blank_page())
+        self.stacked_container.addWidget(self.tab_widget)
+        self.stacked_container.setCurrentIndex(0)
+        self.setCentralWidget(self.stacked_container)
 
-        self.setWindowTitle(f"dosview - {self.file_path}")
         self.show()
 
 
     def action_switch_airdoscontrol(self):
-        print("Switching to Airdos control tab")
-
-        if not self.airdos_tab:
-            self.airdos_tab = AirdosConfigTab()
-            self.tab_widget.addTab(self.airdos_tab, "Airdos control")
-        self.statusBar.showMessage("Airdos control tab opened")
+        self.openAirdosTab()
 
     def about(self):
         message = QMessageBox.about(self, "About dosview", "dosview is a simple tool to visualize data from Universal Scientific Technologies's")
@@ -1318,8 +1212,9 @@ class App(QMainWindow):
         dlg.setFileMode(QFileDialog.ExistingFile)
 
         fn = dlg.getOpenFileName()
-        print(fn)
-        self.openPlotTab(fn[0])
+        print("Open file", fn[0])
+        if fn[0]:
+            self.openPlotTab(fn[0])
 
         dlg.deleteLater()
         
