@@ -40,7 +40,6 @@ dependencies = [
 ]
 
 [tool.setuptools.dynamic]
-long_description_content_type = "text/markdown"
 version = {attr="dosview.version.__version__"}
 
 #[tool.setuptools.package-data]
