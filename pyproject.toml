@@ -15,8 +15,6 @@ maintainers = [
   {name = "Roman Dvorak", email = "dvorakroman@ust.cz"}
 ]
 requires-python = ">=3.6"
-keywords = "UST, dosimeters, airdos, labdos, log, dos, viewer, file"
-
 classifiers = [
     "Development Status :: 3 - Alpha",
     "Intended Audience :: Developers",
