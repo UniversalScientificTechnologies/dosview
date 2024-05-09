@@ -22,11 +22,11 @@ jobs:
       - name: Install redwrench
         shell: bash -l {0}
         run: |
-          pip3 install .
+          pip3 install . --break-system-packages
       - name: install PyInstaller
         shell: bash -l {0}
         run: |
-          pip3 install pyinstaller==6.6.0
+          pip3 install pyinstaller==6.6.0 --break-system-packages
       - name: Build Pyinstaller .exe (macOS and Linux)
         if: matrix.os != 'windows-latest'
         shell: bash -l {0}
