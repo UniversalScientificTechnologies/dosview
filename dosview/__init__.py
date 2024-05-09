@@ -1092,8 +1092,22 @@ class App(QMainWindow):
         self.file_path = args.file_path
         self.initUI()
 
+
         self.plot_tab = None
         self.airdos_tab = None
+
+        self.solve_startup_args()
+
+    
+    def solve_startup_args(self):
+
+        if self.args.file_path:
+            print("Oteviram zalozku s logem")
+            self.openPlotTab()
+        
+        if self.args.airdos:
+            print("Oteviram zalozku s airdosem")
+            self.openAirdosTab()
 
     def updateStackedWidget(self):
         print("Updating stacked widget")
@@ -1141,15 +1155,6 @@ class App(QMainWindow):
         
 
         self.tab_widget = QTabWidget()
-
-
-        if self.args.file_path:
-            print("Oteviram zalozku s logem")
-            self.openPlotTab()
-        
-        if self.args.airdos:
-            print("Oteviram zalozku s airdosem")
-            self.openAirdosTab()
 
         self.tab_widget.setCurrentIndex(0)
         self.tab_widget.setTabsClosable(True)
@@ -1233,11 +1238,6 @@ def main():
         sys.exit(0)
 
     print(args)
-
-    if not args.file_path:
-        pass
-
-    print("...", args.file_path)
 
     pg.setConfigOption('background', 'w')
     pg.setConfigOption('foreground', 'gray')
