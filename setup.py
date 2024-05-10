@@ -37,7 +37,7 @@ class PostInstallCommand(install):
 setup(
     name='dosview',
     #version= dosview.__version__,
-    version="0.1.16",
+    version="0.1.17",
     description='Dosview is a simple graphical log viewer and control interface for Universial Scientific Technologies (UST) dosimeters.', 
     long_description=long_description,
     long_description_content_type='text/markdown',

@@ -3,7 +3,7 @@ import argparse
 
 from PyQt5.QtCore import QThread, pyqtSignal
 from PyQt5.QtWidgets import QApplication, QMainWindow, QVBoxLayout, QWidget, QHBoxLayout
-from PyQt5.QtWidgets import QFileDialog, QTreeWidget, QTreeWidgetItem, QAction, QSplitter, QTableWidgetItem
+from PyQt5.QtWidgets import QPushButton, QFileDialog, QTreeWidget, QTreeWidgetItem, QAction, QSplitter, QTableWidgetItem
 
 from PyQt5.QtGui import QIcon
 
@@ -24,6 +24,7 @@ import numpy as np
 import os
 
 from .version import __version__
+from pyqtgraph import ImageView
 
 
 def parse_file(file_path):
@@ -84,13 +85,13 @@ def parse_file(file_path):
         'internal_time_min': minimal_time,
         'internal_time_max': maximal_time,
         'log_duration': duration,
-        'spectral_count': sums.shape,
-        'channels': hist.shape,
+        'spectral_count': sums.shape[0],
+        'channels': hist.shape[0],
     })
 
     print("Log file parsed in ", time.time()-start_time, " seconds")
 
-    return [time_column, sums, hist, metadata, None]
+    return [time_column, sums, hist, metadata, None, np_spectrum]
 
 class LoadDataThread(QThread):
     data_loaded = pyqtSignal(list)
@@ -150,7 +151,6 @@ class PlotCanvas(pg.GraphicsLayoutWidget):
         plot_spectrum.showGrid(x=True, y=True)
 
         print("PLOT DURATION ... ", time.time()-start_time)
-
 
     def telemetry_toggle(self, key, value):
         if self.telemetry_lines[key] is not None:
@@ -860,6 +860,38 @@ class USBStorageMonitoringThread(QThread):
         # Implement USB storage monitoring logic here
 
 
+
+class LabdosConfigTab(QWidget):
+    def __init__(self):
+        super().__init__()
+        
+        self.initUI()
+    
+    def initUI(self):
+        # Create a QTabWidget
+        tab_widget = QTabWidget()
+        tab_widget.setTabPosition(QTabWidget.West)  # Set the tab position to vertical
+
+        # Create the first tab - Realtime Data
+        realtime_tab = QWidget()
+        realtime_layout = QVBoxLayout()
+
+        firmware_tab = QWidget()
+        firmware_layout = QVBoxLayout()
+
+        # Add the tabs to the tab_widget
+        tab_widget.addTab(realtime_tab, "Realtime Data")
+        tab_widget.addTab(firmware_tab, "Firmware")
+
+        # Create a main layout for the LabdosConfigTab
+        main_layout = QVBoxLayout()
+        main_layout.addWidget(tab_widget)
+
+        # Set the main layout for the LabdosConfigTab
+        self.setLayout(main_layout)
+
+
+
 class AirdosConfigTab(QWidget):
     def __init__(self):
         super().__init__()
@@ -990,13 +1022,55 @@ class AirdosConfigTab(QWidget):
         self.setLayout(layout)
 
 
+class DataSpectrumView(QWidget):
+
+    def __init__(self,parent):
+        self.parent = parent 
+        super(DataSpectrumView, self).__init__(parent)
+        self.setWindowFlags(self.windowFlags() | Qt.Window)
+        self.initUI()
+
+    def initUI(self):
+
+        self.setWindowTitle(repr(self.parent))
+        self.setGeometry(100, 100, 400, 300)
+        self.imv = pg.ImageView(view=pg.PlotItem())
+        layout = QVBoxLayout()
+        layout.addWidget(self.imv)
+        self.setLayout(layout)
+
+    def plot_data(self, data):
+        # Clear the plot widget
+        self.imv.clear()
+
+        # Set the image data
+        self.imv.setImage(np.where(data == 0, np.nan, data))
+        #self.imv.autoLevels()
+        #self.imv.autoRange()
+
+        self.imv.show() 
+
+        self.imv.setPredefinedGradient('thermal')
+        self.imv.getView().showGrid(True, True, 0.2)
+
+
+        # Invert the y-axis
+        self.imv.getView().invertY(False)
+        #self.imv.getView().setLogMode(x=False, y=True)
+        
+
+        # Add axis labels
+        #self.imv.setLabel('left', 'Y Axis')
+        #self.imv.setLabel('bottom', 'X Axis')
+
+
+
 class PlotTab(QWidget):
     def __init__(self):
         super().__init__()
         self.initUI()
     
     def initUI(self):
-        
         self.properties_tree = QTreeWidget()
         self.properties_tree.setColumnCount(2)
         self.properties_tree.setHeaderLabels(["Property", "Value"])
@@ -1005,19 +1079,24 @@ class PlotTab(QWidget):
         self.datalines_tree.setColumnCount(1)
         self.datalines_tree.setHeaderLabels(["Units"])
 
+
+        self.open_img_view_button = QPushButton("Spectrogram")
+        self.open_img_view_button.clicked.connect(self.open_spectrogram_view)
+
+
         log_view_widget = QWidget()
 
         self.left_panel = QSplitter(Qt.Vertical)
 
         self.left_panel.addWidget(self.datalines_tree)
         self.left_panel.addWidget(self.properties_tree)
-
+        self.left_panel.addWidget(self.open_img_view_button)
 
         self.logView_splitter = QSplitter(Qt.Horizontal)
         self.logView_splitter.addWidget(self.left_panel)
         #self.logView_splitter.addWidget(QWidget())
-        
-        
+
+
 
         layout = QVBoxLayout()
         layout.addWidget(self.logView_splitter)
@@ -1042,6 +1121,7 @@ class PlotTab(QWidget):
         self.load_data_thread.start()
 
     def on_data_loaded(self, data):
+        self.data = data # TODO>.. tohle do budoucna zrusit a nahradit tridou parseru.. 
         print("Data are fully loaded...")
         self.plot_canvas.plot(data)
         print("After plot data canvas")
@@ -1080,6 +1160,15 @@ class PlotTab(QWidget):
         self.properties_tree.expandAll()
 
 
+    def open_spectrogram_view(self):
+        matrix = self.data[-1] #TODO .. tohle predelat na nejakou tridu pro parserovani 
+
+        w = DataSpectrumView(self)
+        w.show()
+        w.plot_data(matrix)
+
+
+
 class App(QMainWindow):
     def __init__(self, args):
         super().__init__()
@@ -1108,6 +1197,10 @@ class App(QMainWindow):
         if self.args.airdos:
             print("Oteviram zalozku s airdosem")
             self.openAirdosTab()
+        
+        if self.args.labdos:
+            print("Oteviram zalozku s labdosem")
+            self.openLabdosTab()
 
     def updateStackedWidget(self):
         print("Updating stacked widget")
@@ -1136,7 +1229,12 @@ class App(QMainWindow):
         self.tab_widget.addTab(airdos_tab, "Airdos control")
         self.tab_widget.setCurrentIndex(self.tab_widget.count() - 1)
         self.updateStackedWidget()
-
+    
+    def openLabdosTab(self):
+        labdos_tab = LabdosConfigTab()
+        self.tab_widget.addTab(labdos_tab, "Labdos control")
+        self.tab_widget.setCurrentIndex(self.tab_widget.count() - 1)
+        self.updateStackedWidget()
 
     def blank_page(self):
         # This is widget for blank page
@@ -1153,7 +1251,6 @@ class App(QMainWindow):
         self.setGeometry(self.left, self.top, self.width, self.height)
         self.setWindowIcon(QIcon('media/icon_ust.png'))
         
-
         self.tab_widget = QTabWidget()
 
         self.tab_widget.setCurrentIndex(0)
@@ -1171,9 +1268,12 @@ class App(QMainWindow):
 
         tools = bar.addMenu("&Tools")
         tool_airdosctrl = QAction("AirdosControl", self)
-        #tool_airdosctrl.setCheckable(True)
         tool_airdosctrl.triggered.connect(self.action_switch_airdoscontrol)
         tools.addAction(tool_airdosctrl)
+
+        tools_labdosctrl = QAction("LabdosControl", self)
+        tools_labdosctrl.triggered.connect(self.action_switch_labdoscontrol)
+        tools.addAction(tools_labdosctrl)
 
 
         help = bar.addMenu("&Help")
@@ -1204,10 +1304,12 @@ class App(QMainWindow):
 
     def action_switch_airdoscontrol(self):
         self.openAirdosTab()
+    
+    def action_switch_labdoscontrol(self):
+        self.openLabdosTab()
 
     def about(self):
         message = QMessageBox.about(self, "About dosview", "dosview is a simple tool to visualize data from Universal Scientific Technologies's")
-
 
 
     def open_new_file(self, flag):
@@ -1228,6 +1330,7 @@ def main():
     parser = argparse.ArgumentParser(description='Process some integers.')
     parser.add_argument('file_path', type=str, help='Path to the input file', default=False, nargs='?')
     parser.add_argument('--airdos', action='store_true', help='Enable airdos control tab')
+    parser.add_argument('--labdos', action='store_true', help='Enable labdos control tab')
     parser.add_argument('--no_gui', action='store_true', help='Disable GUI and run in headless mode')
     parser.add_argument('--version', action='store_true', help='Print version and exit')
 
