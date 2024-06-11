@@ -1,10 +1,9 @@
 import sys
 import argparse
 
-from PyQt5.QtCore import QThread, pyqtSignal
+from PyQt5.QtCore import QThread, pyqtSignal, QSettings
 from PyQt5.QtWidgets import QApplication, QMainWindow, QVBoxLayout, QWidget, QHBoxLayout
 from PyQt5.QtWidgets import QPushButton, QFileDialog, QTreeWidget, QTreeWidgetItem, QAction, QSplitter, QTableWidgetItem
-
 from PyQt5.QtGui import QIcon
 
 import pyqtgraph as pg
@@ -26,6 +25,15 @@ import os
 from .version import __version__
 from pyqtgraph import ImageView
 
+
+
+
+class dosparser():
+    def __init__(self):
+        pass 
+
+    def load_file(self, datafile : str , detector = None):
+        pass
 
 def parse_file(file_path):
     start_time = time.time()
@@ -67,8 +75,10 @@ def parse_file(file_path):
 
 
     np_spectrum = np.array(df_lines, dtype=float)
-    time_column = np_spectrum[:, 0]
+    time_column = np_spectrum[:, 1]
+    print(time_column)
     np_spectrum = np_spectrum[:, 8:]
+    print(np_spectrum)
 
     sums = np.sum(np_spectrum[:, 1:], axis=1)
     hist = np.sum(np_spectrum[:, 1:], axis=0)
@@ -448,14 +458,6 @@ class FT260HidDriver():
 
 
     def read_i2c_block_data(self, address, register, length):
-        data = []
-        for i in range(length):
-            self.write_byte_data(address, register, i)
-            byte = self.read_byte(address)
-            data.append(byte)
-        return data
-        
-    def read_i2c_block_data(self, address, register, length):
         """
         I2C Block Read: i2c_smbus_read_i2c_block_data()
         =================================================
@@ -554,8 +556,8 @@ class HIDI2CCommunicationThread(QThread):
     connect = pyqtSignal(bool)
     sendAirdosStatus = pyqtSignal(dict)
 
-    VID = 0x0403
-    PID = 0x6030
+    #VID = 0x0403
+    #PID = 0x6030
     VID = 0x1209    
     PID = 0x7aa0
     I2C_INTERFACE = 0
@@ -641,16 +643,32 @@ class HIDI2CCommunicationThread(QThread):
             # Do usb se to prepne tak, ze bit[0] a bit[2] jsou rozdilne hodnoty, bit[1] a bit[3] jsou read-only
             self.ftdi.write_byte_data(self.addr_switch, 0x01, 0b011)
         else:
-            # Do ATMEGA se to prepne tak, ze bit[0] a bit[2] maji stejne hodnoty hodnoty
+            # I2C do ATMEGA se to prepne tak, ze bit[0] a bit[2] maji stejne hodnoty hodnoty
             self.ftdi.write_byte_data(self.addr_switch, 0x01, 0b0000)
 
     @pyqtSlot()
     def connectSlot(self, state = True, power_off = False):
         print("Connecting to HID device... ", state)
         if state:
+
+            hid_interface_i2c = None
+            hid_interface_uart = None
+
+            for hidDevice in hid.enumerate(0, 0):
+                print(hidDevice)
+                if hidDevice['vendor_id'] == self.VID and hidDevice['product_id'] == self.PID:
+                    if hidDevice['interface_number'] == 0:
+                        hid_interface_i2c = hidDevice
+                    else:
+                        hid_interface_uart = hidDevice
+            
             self.dev = hid.device()
-            self.dev.open(self.VID, self.PID)
-            print("Connected to HID device", self.dev)
+            #self.dev.open(self.VID, self.PID)
+            self.dev.open_path(hid_interface_i2c['path'])
+
+            self.dev_uart = hid.device()
+            self.dev_uart.open_path(hid_interface_uart['path'])
+            print("Connected to HID device", self.dev, self.dev_uart)
 
             self.dev.send_feature_report([0xA1, 0x20])
             self.dev.send_feature_report([0xA1, 0x02, 0x01])
@@ -698,6 +716,7 @@ class HIDI2CCommunicationThread(QThread):
             self.set_i2c_direction_to_usb(False)
 
             self.dev.close()
+            self.dev_uart.close()
             self.dev = None
             self.ftdi = None
             self.connected.emit(False)
@@ -709,25 +728,46 @@ class HIDI2CCommunicationThread(QThread):
         r02 = self.ftdi.read_byte_data(self.addr_rtc, 0x02)
         r03 = self.ftdi.read_byte_data(self.addr_rtc, 0x03)
         r04 = self.ftdi.read_byte_data(self.addr_rtc, 0x04)
+        r05 = self.ftdi.read_byte_data(self.addr_rtc, 0x05)
         r06 = self.ftdi.read_byte_data(self.addr_rtc, 0x06)
         r07 = self.ftdi.read_byte_data(self.addr_rtc, 0x07)
 
-        sec100 = r00
-        absdate = datetime.datetime.utcnow()
-        sec = ((r01 >> 4) & 0b111) * 10 + (r01 & 0b1111)
-        minu= ((r02 >> 4) & 0b111) * 10 + (r02 & 0b1111)
-        hourL= ((r03 >> 4) & 0b11) * 10 + (r03 & 0b1111)
-        hourM = ((r04 >> 4) & 0b11) * 10 + (r04 & 0b1111)
-        hourR = ((r06 >> 4) & 0b1) * 10 + (r06 & 0b1111)
-
-        hour = hourR << 8 | hourM << 4 | hourL
-        date = datetime.timedelta(hours=hour, minutes=minu, seconds=sec, milliseconds=sec100*10)
+        #r = self.ftdi.read_i2c_block_data(self.addr_rtc, 0x00, 8)
         
-        return(absdate, date)
+        sec100 = r00 & 0b1111 + ((r00 & 0b11110000) >> 4) * 10
+        absdate = datetime.datetime.now(datetime.timezone.utc)
+        sec = r01 & 0b1111 + ((r01 & 0b01110000) >> 4) * 10
+        minu= r02 & 0b1111 + ((r02 & 0b01110000) >> 4) * 10
+        hour = r03 & 0b1111 + ((r03 & 0b11110000) >> 4) * 10
+        hour += r04 & 0b1111 * 100 + ((r04 & 0b11110000) >> 4) * 1000
+        hour += r05 & 0b1111 * 10000 + ((r05 & 0b11110000) >> 4) * 100000
+        #hour = r03 + r04*100 + r05*10000
+
+        print("RTC data:", r00, r01, r02, r03, r04, r05, r06, r07)
+        print("RTC time: ", hour, minu, sec, sec100)
+
+        date_delta = datetime.timedelta(hours=hour, minutes=minu, seconds=sec, milliseconds=sec100*10)
+        
+        return(absdate, date_delta)
+    
+    def reset_time(self):
+        reset_time = datetime.datetime.now(datetime.timezone.utc)
+        
+        # self.ftdi.write_i2c_block_data(self.addr_rtc, 0x00, [0, 0, 0, 0, 0, 0, 0, 0])
+        
+        self.ftdi.write_byte_data(self.addr_rtc, 0x00, 0)
+        self.ftdi.write_byte_data(self.addr_rtc, 0x01, 0)
+        self.ftdi.write_byte_data(self.addr_rtc, 0x02, 0)
+        self.ftdi.write_byte_data(self.addr_rtc, 0x03, 0)
+        self.ftdi.write_byte_data(self.addr_rtc, 0x04, 0)
+        self.ftdi.write_byte_data(self.addr_rtc, 0x05, 0)
+        self.ftdi.write_byte_data(self.addr_rtc, 0x06, 0)
+        self.ftdi.write_byte_data(self.addr_rtc, 0x07, 0)
+
+        print("Time reseted at...", reset_time)
+
 
     def get_battery(self):
-
-
         ibus_adc = (self.ftdi.read_byte_data(self.addr_charger, 0x28) >> 1) * 2  
         ibat_adc = (self.ftdi.read_byte_data(self.addr_charger, 0x2A) >> 2) * 4 
         vbus_adc = (self.ftdi.read_byte_data(self.addr_charger, 0x2C) >> 2) * 3.97 / 1000
@@ -778,7 +818,8 @@ class HIDI2CCommunicationThread(QThread):
         data.update({
             'RTC': {
                 'sys_time': sys_date,
-                'abs_time': abstime
+                'abs_time': abstime,
+                'sys_begin_time': abstime - sys_date
             },
             'CHARGER': charger,
             'GAUGE': gauge
@@ -834,8 +875,15 @@ class HIDI2CCommunicationThread(QThread):
         self.set_i2c_direction_to_usb(False)
         print("Posilam...", type(data))
         print(data)
-        self.sendAirdosStatus.emit(data)  
-        
+        self.sendAirdosStatus.emit(data)
+
+
+    @pyqtSlot()
+    def reset_rtc_time(self):
+        self.set_i2c_direction_to_usb(True)
+        self.reset_time()
+        self.set_i2c_direction_to_usb(False)
+
 class HIDUARTCommunicationThread(QThread):
     connected = pyqtSignal(bool)
 
@@ -991,6 +1039,9 @@ class AirdosConfigTab(QWidget):
         reload_button.clicked.connect(self.i2c_thread.get_airdos_status)
         i2c_layout.addWidget(reload_button)
 
+        reset_time_button = QPushButton("Reset time")
+        reset_time_button.clicked.connect(self.i2c_thread.reset_rtc_time)
+        i2c_layout.addWidget(reset_time_button)
 
         uart_widget = QGroupBox("UART")
         uart_layout = QVBoxLayout()
@@ -1081,7 +1132,13 @@ class PlotTab(QWidget):
 
 
         self.open_img_view_button = QPushButton("Spectrogram")
+        self.open_img_view_button.setMaximumHeight(20)
         self.open_img_view_button.clicked.connect(self.open_spectrogram_view)
+
+        self.upload_file_button = QPushButton("Upload file")
+        self.upload_file_button.setMaximumHeight(20)
+        #self.upload_file_button.clicked.connect(self.upload_file_dialog)
+
 
 
         log_view_widget = QWidget()
@@ -1090,7 +1147,11 @@ class PlotTab(QWidget):
 
         self.left_panel.addWidget(self.datalines_tree)
         self.left_panel.addWidget(self.properties_tree)
-        self.left_panel.addWidget(self.open_img_view_button)
+
+        vb = QHBoxLayout()
+        vb.addWidget(self.open_img_view_button)
+        vb.addWidget(self.upload_file_button)
+        self.left_panel.setLayout(vb)
 
         self.logView_splitter = QSplitter(Qt.Horizontal)
         self.logView_splitter.addWidget(self.left_panel)
@@ -1168,6 +1229,97 @@ class PlotTab(QWidget):
         w.plot_data(matrix)
 
 
+class PreferencesVindow(QDialog):
+    def __init__(self):
+        super().__init__()
+        self.initUI()
+    
+
+    def DosportalTab(self):
+        #self.dosportal_tab_group = QGroupBox("DOSPORTAL settings")
+        self.dosportal_tab_layout = QVBoxLayout()
+        settings = QSettings("UST", "dosview")
+
+
+        self.url = QLineEdit()
+        self.login = QLineEdit()
+        self.password = QLineEdit()
+
+        # Load data from QSettings
+        url = settings.value("url")
+        if url is not None:
+            self.url.setText(url)
+        login = settings.value("login")
+        if login is not None:
+            self.login.setText(login)
+
+        password = settings.value("password")
+        self.password.setEchoMode(QLineEdit.Password)
+        if password is not None:
+            self.password.setText(password)
+
+        vb = QHBoxLayout()
+        vb.addWidget(QLabel("URL"))
+        vb.addWidget(self.url)
+        self.dosportal_tab_layout.addLayout(vb)
+
+        vb = QHBoxLayout()
+        vb.addWidget(QLabel("Login"))
+        vb.addWidget(self.login)
+        self.dosportal_tab_layout.addLayout(vb)
+
+        vb = QHBoxLayout()
+        vb.addWidget(QLabel("Password"))
+        vb.addWidget(self.password)
+        self.dosportal_tab_layout.addLayout(vb)
+
+
+        # Save data to QSettings
+        def save_settings():
+            settings.setValue("url", self.url.text())
+            settings.setValue("login", self.login.text())
+            settings.setValue("password", self.password.text())
+
+        # Connect save button to save_settings function
+        save_button = QPushButton("Save credentials")
+        save_button.clicked.connect(save_settings)
+
+        test_button = QPushButton("Test connection")
+        test_button.clicked.connect(lambda: print("Testing connection .... not implemented yet :-) "))
+
+        vb = QHBoxLayout()
+        vb.addWidget(save_button)
+        vb.addWidget(test_button)
+
+        self.dosportal_tab_layout.addLayout(vb)
+
+        self.dosportal_tab_layout.addStretch(1)
+        return self.dosportal_tab_layout
+        #self.dosportal_tab_group.setLayout(self.dosportal_tab_layout)
+        #return self.dosportal_tab_group
+        
+    
+    def initUI(self):
+        
+        self.setWindowTitle("DOSVIEW Preferences")
+        self.setGeometry(100, 100, 400, 300)
+        self.layout = QVBoxLayout()
+        self.setLayout(self.layout)
+
+        self.tabs = QTabWidget()
+        self.layout.addWidget(self.tabs)
+
+        self.dosportal_tab = QWidget()
+        #self.dosportal_tab_layout = QVBoxLayout()
+        self.dosportal_tab.setLayout( self.DosportalTab() )
+
+        self.tabs.addTab(self.dosportal_tab, "DOSPORTAL")
+
+
+
+        self.tabs.addTab(QWidget(), "Advanced")
+        #self.layout.addWidget(QPushButton("Save"))
+
 
 class App(QMainWindow):
     def __init__(self, args):
@@ -1175,6 +1327,7 @@ class App(QMainWindow):
         self.args = args
         self.left = 100
         self.top = 100
+        self.settings = QSettings("UST", "dosview")
         self.title = 'dosview'
         self.width = 640
         self.height = 400
@@ -1251,6 +1404,9 @@ class App(QMainWindow):
         self.setGeometry(self.left, self.top, self.width, self.height)
         self.setWindowIcon(QIcon('media/icon_ust.png'))
         
+        self.restoreGeometry(self.settings.value("geometry", self.saveGeometry()))
+        self.restoreState(self.settings.value("windowState", self.saveState()))
+
         self.tab_widget = QTabWidget()
 
         self.tab_widget.setCurrentIndex(0)
@@ -1267,6 +1423,11 @@ class App(QMainWindow):
 
 
         tools = bar.addMenu("&Tools")
+
+        preferences = QAction("Preferences", self)
+        preferences.triggered.connect(lambda: PreferencesVindow().exec())
+        tools.addAction(preferences)
+
         tool_airdosctrl = QAction("AirdosControl", self)
         tool_airdosctrl.triggered.connect(self.action_switch_airdoscontrol)
         tools.addAction(tool_airdosctrl)
@@ -1324,6 +1485,12 @@ class App(QMainWindow):
             self.openPlotTab(fn[0])
 
         dlg.deleteLater()
+    
+    def closeEvent(self, event):
+        print("Closing dosview...")
+        self.settings.setValue("geometry", self.saveGeometry())
+        self.settings.setValue("windowState", self.saveState())
+        event.accept()
         
 
 def main():
