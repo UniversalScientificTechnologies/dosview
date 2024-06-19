@@ -1,8 +1,9 @@
 import sys
 import argparse
 
+from PyQt5 import QtNetwork
 from PyQt5.QtCore import QThread, pyqtSignal, QSettings
-from PyQt5.QtWidgets import QApplication, QMainWindow, QVBoxLayout, QWidget, QHBoxLayout
+from PyQt5.QtWidgets import QApplication, QMainWindow, QVBoxLayout, QWidget, QHBoxLayout, QFormLayout
 from PyQt5.QtWidgets import QPushButton, QFileDialog, QTreeWidget, QTreeWidgetItem, QAction, QSplitter, QTableWidgetItem
 from PyQt5.QtGui import QIcon
 
@@ -26,8 +27,6 @@ from .version import __version__
 from pyqtgraph import ImageView
 
 
-
-
 class dosparser():
     def __init__(self):
         pass 
@@ -45,6 +44,7 @@ def parse_file(file_path):
         'log_info': {}
     }
     df_lines = []
+    unique_events = []
     df_metadata = []
 
     with open(file_path, 'r') as file:
@@ -55,6 +55,9 @@ def parse_file(file_path):
             match parts[0]:
                 case "$HIST":
                     df_lines.append(parts[1:])
+                case "$HITS":
+                    # $HITS,4,404028.86,68,404211.95,75,404317.81,65,404558.1,94, ... 
+                    unique_events += [(float(parts[i]), int(parts[i+1])) for i in range(2, len(parts), 2)]
                 case "$DOS":
                     metadata['log_runs_count'] += 1
                     metadata['log_device_info']['DOS'] = {
@@ -68,17 +71,33 @@ def parse_file(file_path):
                     }
                 case "$DIG" | "$ADC" as device_type:
                     clean_type = device_type.strip('$')
-                case "$ENV" | "$BATT":
-                    df_metadata.append(parts)
+                case "$ENV":# | "$BATT":
+                    df_metadata.append(parts[2:])
                 case _:
                     print(f'Unknown row type: {parts[0]}')
 
 
     np_spectrum = np.array(df_lines, dtype=float)
+
+    zero_columns = np.zeros((np_spectrum.shape[0], 1000))
+
+    # Připojení nulových sloupců k původnímu poli
+    np_spectrum = np.hstack((np_spectrum, zero_columns))
+
+    print(np_spectrum)
+
     time_column = np_spectrum[:, 1]
     print(time_column)
     np_spectrum = np_spectrum[:, 8:]
     print(np_spectrum)
+
+    #print("Unique events: ", unique_events)
+
+    for i, event in enumerate(unique_events):
+        time_index = np.searchsorted(time_column, event[0])
+        print(event[0], event[1], time_index)
+        np_spectrum[time_index, event[1]] += 1
+        # np_spectrum[event[0], i] += event[1]
 
     sums = np.sum(np_spectrum[:, 1:], axis=1)
     hist = np.sum(np_spectrum[:, 1:], axis=0)
@@ -87,8 +106,12 @@ def parse_file(file_path):
     maximal_time = time_column.max()
     duration = maximal_time - minimal_time
     
-    #df_metadata = pd.DataFrame(df_metadata, columns=range(9))
+    np_metadata = np.array(df_metadata).astype(float)
+    #np_metadata[:, 2] -= minimal_time
+    print("METADATA")
+    print(np_metadata)
     
+
     metadata['log_info'].update({
         'log_type': 'xDOS_SPECTRAL',
         'log_type_version': '1.0',
@@ -97,11 +120,12 @@ def parse_file(file_path):
         'log_duration': duration,
         'spectral_count': sums.shape[0],
         'channels': hist.shape[0],
+        'hits_count': len(unique_events),
     })
 
     print("Log file parsed in ", time.time()-start_time, " seconds")
 
-    return [time_column, sums, hist, metadata, None, np_spectrum]
+    return [time_column, sums, hist, metadata, np_metadata, np_spectrum]
 
 class LoadDataThread(QThread):
     data_loaded = pyqtSignal(list)
@@ -155,6 +179,14 @@ class PlotCanvas(pg.GraphicsLayoutWidget):
                         symbolBrush = 0.2, name = "Energy")
         plot_spectrum.setLabel("left", "Total count per channel", units="#")
         plot_spectrum.setLabel("bottom", "Channel", units="#")
+
+        np_metadata = data[4]
+        ##np_metadata[:,1] -= 
+        
+        print("METADATA")
+        print(np_metadata[:,0]/60)
+        print(np_metadata[:,6])
+        plot_evolution.plot(np_metadata[:,0]/60, np_metadata[:,6], pen="b", symbol='p', symbolPen='b', symbolBrush=0.1, name="Pressure")
 
 
         plot_spectrum.setLogMode(x=True, y=True)
@@ -1137,7 +1169,7 @@ class PlotTab(QWidget):
 
         self.upload_file_button = QPushButton("Upload file")
         self.upload_file_button.setMaximumHeight(20)
-        #self.upload_file_button.clicked.connect(self.upload_file_dialog)
+        self.upload_file_button.clicked.connect(lambda: UploadFileDialog().exec_())
 
 
 
@@ -1228,6 +1260,64 @@ class PlotTab(QWidget):
         w.show()
         w.plot_data(matrix)
 
+
+class UploadFileDialog(QDialog):
+    def __init__(self, parent=None):
+        super().__init__()
+        self._manager = QtNetwork.QNetworkAccessManager()
+        self._manager.finished.connect(self.on_request_finished)
+        self.initUI()
+    
+    def initUI(self):
+        self.setWindowTitle("Upload file")
+        self.setGeometry(100, 100, 400, 300)
+        self.layout = QVBoxLayout()
+        self.setLayout(self.layout)
+
+        self.file_path = QLineEdit()
+        self.record_name = QLineEdit()
+        self.description = QTextEdit()
+        self.time_tracked = QCheckBox("Time tracked")
+        self.record_metadata = QTextEdit()
+        
+        upload_button = QPushButton("Upload")
+        upload_button.clicked.connect(self.upload_file)
+
+        lay = QFormLayout()
+        lay.addRow("File path:", self.file_path)
+        lay.addRow("Record name:", self.record_name)
+        lay.addRow("Description:", self.description)
+        lay.addRow("Time tracked:", self.time_tracked)
+        lay.addRow("Record metadata:", self.record_metadata)
+        lay.addRow(upload_button)
+
+        self.upload_button = QPushButton("Upload")
+        self.upload_button.clicked.connect(self.upload_file)
+        self.layout.addLayout(lay)
+    
+    def upload_file(self):
+        file_path = self.file_path.text()
+        print("Uploading file", file_path)
+        self.accept()
+    
+    def on_request_finished(self, reply):
+        print("Upload finished")
+        self.accept()
+
+    @pyqtSlot()
+    def upload(self):   
+        data = {
+            "name": self.record_name.text(),
+            "": ""
+        }
+        path = self.filepath_lineedit.text()
+        files = {"image": path}
+        multi_part = self.construct_multipart(data, files)
+        if multi_part:
+            url = QtCore.QUrl("http://127.0.0.1:8100/api/record/")
+            request = QtNetwork.QNetworkRequest(url)
+            reply = self._manager.post(request, multi_part)
+            multi_part.setParent(reply)
 
 class PreferencesVindow(QDialog):
     def __init__(self):
