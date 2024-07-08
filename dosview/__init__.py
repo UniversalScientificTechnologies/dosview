@@ -2,6 +2,7 @@ import sys
 import argparse
 
 from PyQt5 import QtNetwork
+from PyQt5.QtNetwork import QLocalSocket, QLocalServer
 from PyQt5.QtCore import QThread, pyqtSignal, QSettings
 from PyQt5.QtWidgets import QApplication, QMainWindow, QVBoxLayout, QWidget, QHBoxLayout, QFormLayout
 from PyQt5.QtWidgets import QPushButton, QFileDialog, QTreeWidget, QTreeWidgetItem, QAction, QSplitter, QTableWidgetItem
@@ -84,22 +85,20 @@ def parse_file(file_path):
     # Připojení nulových sloupců k původnímu poli
     np_spectrum = np.hstack((np_spectrum, zero_columns))
 
-    print(np_spectrum)
-
     time_column = np_spectrum[:, 1]
-    print(time_column)
-    np_spectrum = np_spectrum[:, 8:]
-    print(np_spectrum)
-
-    #print("Unique events: ", unique_events)
+    #print(time_column)
+    np_spectrum = np_spectrum[:, 7:]
+    #print(np_spectrum)
 
     for i, event in enumerate(unique_events):
         time_index = np.searchsorted(time_column, event[0])
         print(event[0], event[1], time_index)
         np_spectrum[time_index, event[1]] += 1
-        # np_spectrum[event[0], i] += event[1]
 
     sums = np.sum(np_spectrum[:, 1:], axis=1)
+
+    #print("Scitam tohle..")
+    #print(np_spectrum[:, 1:])
     hist = np.sum(np_spectrum[:, 1:], axis=0)
 
     minimal_time = time_column.min()
@@ -858,14 +857,12 @@ class HIDI2CCommunicationThread(QThread):
         })
 
         a,b = self.sht_read_sensor_data(self.addr_sht, [0x24, 0x0b] )
-
         data['SHT'] = {
             'temperature': a,
             'humidity': b
         }
 
         a, b = self.sht_read_sensor_data(self.addr_an_sht, [0x24, 0x0b] )
-
         data['AIRDOS_SHT'] = {
             'temperature': a,
             'humidity': b
@@ -1136,17 +1133,13 @@ class DataSpectrumView(QWidget):
         self.imv.setPredefinedGradient('thermal')
         self.imv.getView().showGrid(True, True, 0.2)
 
-
         # Invert the y-axis
         self.imv.getView().invertY(False)
         #self.imv.getView().setLogMode(x=False, y=True)
         
-
         # Add axis labels
         #self.imv.setLabel('left', 'Y Axis')
         #self.imv.setLabel('bottom', 'X Axis')
-
-
 
 class PlotTab(QWidget):
     def __init__(self):
@@ -1171,8 +1164,6 @@ class PlotTab(QWidget):
         self.upload_file_button.setMaximumHeight(20)
         self.upload_file_button.clicked.connect(lambda: UploadFileDialog().exec_())
 
-
-
         log_view_widget = QWidget()
 
         self.left_panel = QSplitter(Qt.Vertical)
@@ -1188,8 +1179,6 @@ class PlotTab(QWidget):
         self.logView_splitter = QSplitter(Qt.Horizontal)
         self.logView_splitter.addWidget(self.left_panel)
         #self.logView_splitter.addWidget(QWidget())
-
-
 
         layout = QVBoxLayout()
         layout.addWidget(self.logView_splitter)
@@ -1222,14 +1211,19 @@ class PlotTab(QWidget):
         self.properties_tree.clear()
 
         def add_properties_to_tree(item, properties):
-           for key, value in properties.items():
-               if isinstance(value, dict):
-                   parent_item = QTreeWidgetItem([key])
-                   item.addChild(parent_item)
-                   add_properties_to_tree(parent_item, value)
-               else:
-                   child_item = QTreeWidgetItem([key, str(value)])
-                   item.addChild(child_item)
+            for key, value in properties.items():
+                # Pokud je to uroven ve storomu
+                if isinstance(value, dict):
+                    parent_item = QTreeWidgetItem([key])
+                    item.addChild(parent_item)
+                    add_properties_to_tree(parent_item, value)
+                # Zobraz samotne hodnoty
+                else:
+                    if key in ['internal_time_min', 'internal_time_max', 'log_duration']:
+                        value_td = datetime.timedelta(seconds=value)
+                        value = f"{value_td}, ({value} seconds)"
+                    child_item = QTreeWidgetItem([key, str(value)])
+                    item.addChild(child_item)
 
         metadata = data[3]
         for key, value in metadata.items():
@@ -1590,6 +1584,7 @@ def main():
     parser.add_argument('--labdos', action='store_true', help='Enable labdos control tab')
     parser.add_argument('--no_gui', action='store_true', help='Disable GUI and run in headless mode')
     parser.add_argument('--version', action='store_true', help='Print version and exit')
+    parser.add_argument('--new-window', action='store_true', help="Open file in new window")
 
     args = parser.parse_args()
 
@@ -1602,8 +1597,39 @@ def main():
     pg.setConfigOption('background', 'w')
     pg.setConfigOption('foreground', 'gray')
 
-
     app = QApplication(sys.argv)
+
+    # Create a local server for IPC
+    server_name = 'dosview'
+    socket = QLocalSocket()
+    socket.connectToServer(server_name)
+    
+    if socket.waitForConnected(500):
+        socket.write(args.file_path.encode())
+        socket.flush()
+        socket.waitForBytesWritten(1000)
+        socket.disconnectFromServer()
+        print("dosview is already running. Sending file path to the running instance.")
+        sys.exit(0)
+    else:
+        server = QLocalServer()
+        server.listen(server_name)
+        
+        def handle_connection():
+            socket = server.nextPendingConnection()
+            if socket.waitForReadyRead(1000):
+                filename = socket.readAll().data().decode()
+                print("Opening file from external instance startup ...", filename)
+                ex.openPlotTab(filename)
+                ex.activateWindow()
+                ex.raise_()
+                ex.setFocus()
+
+                
+        
+        server.newConnection.connect(handle_connection)
+    
+
     ex = App(args)
     sys.exit(app.exec_())
 
