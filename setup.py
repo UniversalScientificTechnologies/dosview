@@ -33,11 +33,13 @@ class PostInstallCommand(install):
 # Get the commit hash
 #commit_hash = subprocess.check_output(['git', 'rev-parse', 'HEAD']).decode().strip()
 
+version_ns = {}
+with open("dosview/version.py") as f:
+    exec(f.read(), version_ns)
 
 setup(
     name='dosview',
-    #version= dosview.__version__,
-    version="0.1.19",
+    version=version_ns["__version__"],
     description='Dosview is a simple graphical log viewer and control interface for Universial Scientific Technologies (UST) dosimeters.', 
     long_description=long_description,
     long_description_content_type='text/markdown',
