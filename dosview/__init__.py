@@ -1641,13 +1641,13 @@ class App(QMainWindow):
         help.addAction(doc)
         doc.triggered.connect(lambda: QDesktopServices.openUrl(QUrl("https://docs.dos.ust.cz/dosview/")))
 
-        gith = QAction("Dosview GitHub", self)
+        gith = QAction("GitHub repository", self)
         help.addAction(gith)
         gith.triggered.connect(lambda: QDesktopServices.openUrl(QUrl("https://github.com/UniversalScientificTechnologies/dosview/")))
 
         about = QAction("About", self)
         help.addAction(about)
-        help.triggered.connect(self.about)
+        about.triggered.connect(self.about)
 
         self.statusBar = QStatusBar()
         self.setStatusBar(self.statusBar)
@@ -1668,8 +1668,44 @@ class App(QMainWindow):
     def action_switch_labdoscontrol(self):
         self.openLabdosTab()
 
+    import sys
+    import datetime
+    from PyQt5.QtCore import QT_VERSION_STR
+    from PyQt5.QtWidgets import QMessageBox
+    from PyQt5.QtGui import QPixmap
+
     def about(self):
-        message = QMessageBox.about(self, "About dosview", "dosview is a simple tool to visualize data from Universal Scientific Technologies's")
+        about_text = f"""
+        <b>dosview</b><br>
+        <b>Version:</b> {__version__}<br>
+        <br>
+        Universal Scientific Technologies, s.r.o.<br>
+        <a href="https://www.ust.cz/about/">www.ust.cz/</a><br>
+        <br>
+        <b>Description:</b><br>
+        dosview is a utility for visualization and analysis of data from UST's <a href="https://docs.dos.ust.cz/">dosimeters and spectrometers</a>.<br>
+        <br>
+        <b>Support:</b> <a href="mailto:support@ust.cz">support@ust.cz</a><br>
+        <br>
+        <b> <a href="https://github.com/UniversalScientificTechnologies/dosview/issues">Report an issue to GitHub Issues</a><br>
+        <br>
+        <b>Source code:</b> <a href="https://github.com/UniversalScientificTechnologies/dosview/">GitHub repository</a><br>
+        <br>
+        <b>Technical info:</b><br>
+        Python: {sys.version.split()[0]}<br>
+        Qt: {QT_VERSION_STR}<br>
+        Build date: {datetime.datetime.now().strftime("%Y-%m-%d")}<br>
+        <br>
+        <b>License:</b> GPL-3.0 License<br>
+        &copy; 2025 Universal Scientific Technologies, s.r.o.<br>
+        """
+        dlg = QMessageBox(self)
+        dlg.setWindowTitle("About dosview")
+        dlg.setTextFormat(Qt.TextFormat.RichText)
+        dlg.setText(about_text)
+        dlg.setIconPixmap(QPixmap("media/icon_ust.png").scaled(64, 64))
+        dlg.setStandardButtons(QMessageBox.Ok)
+        dlg.exec_()
 
 
     def open_new_file(self, flag):
