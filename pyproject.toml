@@ -49,6 +49,7 @@ version = {attr="dosview.version.__version__"}
 
 [project.scripts]
 dosview = "dosview:main"
+airdos04-info = "dosview.airdos04_info:main"
 
 [project.urls]
 homepage = "https://docs.dos.ust.cz/dosview/"
