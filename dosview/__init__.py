@@ -11,235 +11,32 @@ from PyQt5.QtGui import QIcon
 import pyqtgraph as pg
 
 import pandas as pd
-from PyQt5.QtWidgets import QSplitter
 
-import datetime
-import time 
-
-from PyQt5.QtCore import *
-from PyQt5.QtGui import *
-from PyQt5.QtWidgets import *
-
-import hid
-import numpy as np
-import os
-
-from .version import __version__
-from pyqtgraph import ImageView
-
-
-
-import sys
-import argparse
-
-from PyQt5 import QtNetwork
-from PyQt5.QtNetwork import QLocalSocket, QLocalServer
-from PyQt5.QtCore import QThread, pyqtSignal, QSettings
-from PyQt5.QtWidgets import QApplication, QMainWindow, QVBoxLayout, QWidget, QHBoxLayout, QFormLayout
-from PyQt5.QtWidgets import QPushButton, QFileDialog, QTreeWidget, QTreeWidgetItem, QAction, QSplitter, QTableWidgetItem
-from PyQt5.QtGui import QIcon
-import pyqtgraph as pg
-import pandas as pd
 import datetime
 import time
+
 from PyQt5.QtCore import *
 from PyQt5.QtGui import *
 from PyQt5.QtWidgets import *
+
 import hid
 import numpy as np
 import os
+
 from .version import __version__
 from pyqtgraph import ImageView
 
-# ---- PARSER INFRA ----
-
-class BaseLogParser:
-    """Základní třída parseru."""
-    def __init__(self, file_path):
-        self.file_path = file_path
-
-    @staticmethod
-    def detect(file_path):
-        """Vrací True pokud tento parser umí parsovat daný soubor."""
-        raise NotImplementedError
-
-    def parse(self):
-        """Vrací rozparsovaná data."""
-        raise NotImplementedError
-
-
-class Airdos04CLogParser(BaseLogParser):
-    """Parser pro logy typu AIRDOS04C."""
-    @staticmethod
-    def detect(file_path):
-        with open(file_path, "r") as f:
-            for line in f:
-                if line.startswith("$DOS") and "AIRDOS04C" in line:
-                    return True
-        return False
-
-    def parse(self):
-        start_time = time.time()
-        print("AIRDOS04C parser start")
-        metadata = {
-            'log_runs_count': 0,
-            'log_device_info': {},
-            'log_info': {}
-        }
-        hist = np.zeros(1024, dtype=int)
-        total_counts = 0
-
-
-        sums = []
-        time_axis = []
-
-        inside_run = False
-        current_hist = None
-        current_counts = 0
-
-        with open(self.file_path, 'r') as file:
-            for line in file:
-                parts = line.strip().split(",")
-                match parts[0]:
-                    case "$DOS":
-                        metadata['log_device_info']['DOS'] = {
-                            "type": parts[0],
-                            "hw-model": parts[1],
-                            "fw-version": parts[2],
-                            "eeprom": parts[3],
-                            "fw-commit": parts[4],
-                            "fw-build_info": parts[5],
-                            'hw-sn': parts[6].strip(),
-                        }
-                        metadata['log_runs_count'] += 1
-                    case "$START":
-                        inside_run = True
-                        current_hist = np.zeros_like(hist)
-                        current_counts = 0
-                    case "$E":
-                        if inside_run and len(parts) >= 3:
-                            channel = int(parts[2])
-                            if 0 <= channel < current_hist.shape[0]:
-                                current_hist[channel] += 1
-                                current_counts += 1
-                    case "$STOP":
-                        if inside_run:
-                            # Přičti hodnoty z $STOP (kanálové stavy na konci expozice)
-                            if len(parts) > 4:
-                                for idx, val in enumerate(parts[4:]):
-                                    try:
-                                        current_hist[idx] += int(val)
-                                    except Exception:
-                                        pass
-                            hist += current_hist
-                            total_counts += current_counts
-                            sums.append(current_counts)
-                            time_axis.append(float(parts[2]))
-                        inside_run = False
-                        current_hist = None
-                    case _:
-                        continue
-
-        metadata['log_info']['histogram_channels'] = hist.shape[0]
-        metadata['log_info']['events_total'] = int(total_counts)  # pouze součet všech E!
-        metadata['log_info']['log_type_version'] = "2.0"
-        metadata['log_info']['log_type'] = 'xDOS_SPECTRAL'
-        metadata['log_info']['detector_type'] = "AIRDOS04C"
-        print("Parsed AIRDOS04C format in", time.time() - start_time, "s")
-
-        return [np.array(time_axis), np.array(sums), hist, metadata]
-
-
-    
-class OldLogParser(BaseLogParser):
-    """Parser pro starší logy (ne-AIRDOS04C)."""
-    @staticmethod
-    def detect(file_path):
-        with open(file_path, "r") as f:
-            for line in f:
-                if line.startswith("$DOS") and "AIRDOS04C" not in line:
-                    return True
-        return False
-
-    def parse(self):
-        start_time = time.time()
-        print("OLD parser start")
-        metadata = {
-            'log_runs_count': 0,
-            'log_device_info': {},
-            'log_info': {}
-        }
-        df_lines = []  # $HIST
-        df_metadata = []
-        unique_events = []  # $HITS
-        with open(self.file_path, 'r') as file:
-            for line in file:
-                parts = line.strip().split(",")
-                match parts[0]:
-                    case "$DOS":
-                        metadata['log_device_info']['DOS'] = {
-                            "type": parts[0],
-                            "hw-model": parts[1],
-                            "fw-version": parts[2],
-                            "eeprom": parts[3],
-                            "fw-commit": parts[4],
-                            "fw-build_info": parts[5],
-                            'hw-sn': parts[6].strip(),
-                        }
-                        metadata['log_runs_count'] += 1
-                    case "$ENV":
-                        df_metadata.append(parts[2:])
-                    case "$HIST":
-                        df_lines.append(parts[1:])
-                    case "$HITS":
-                        unique_events += [(float(parts[i]), int(parts[i+1])) for i in range(2, len(parts), 2)]
-                    case _:
-                        continue
-        np_spectrum = np.array(df_lines, dtype=float)
-        zero_columns = np.zeros((np_spectrum.shape[0], 1000))
-        np_spectrum = np.hstack((np_spectrum, zero_columns))
-        time_column = np_spectrum[:, 1]
-        np_spectrum = np_spectrum[:, 7:]
-        for event in unique_events:
-            t, ch = event
-            time_index = np.searchsorted(time_column, t)
-            if 0 <= time_index < np_spectrum.shape[0] and 0 <= ch < np_spectrum.shape[1]:
-                np_spectrum[time_index, ch] += 1
-        hist = np.sum(np_spectrum[:, 1:], axis=0)
-        sums = np.sum(np_spectrum[:, 1:], axis=1)
-        metadata['log_info'].update({
-            'internal_time_min': time_column.min(),
-            'internal_time_max': time_column.max(),
-            'log_duration': time_column.max() - time_column.min(),
-            'spectral_count': sums.shape[0],
-            'channels': hist.shape[0],
-            'hits_count': len(unique_events),
-            'log_type_version': "1.0",
-            'log_type': 'xDOS_SPECTRAL',
-            'detector_type': metadata['log_device_info']['DOS'].get('hw-model', 'unknown'),
-        })
-        print("Parsed OLD format in", time.time() - start_time, "s")
-        return [time_column, sums, hist, metadata]
-
-
-class dosparser():
-    def __init__(self):
-        pass 
-
-    def load_file(self, datafile : str , detector = None):
-        pass
-
-LOG_PARSERS = [Airdos04CLogParser, OldLogParser]
-
-def get_parser_for_file(file_path):
-    for parser_cls in LOG_PARSERS:
-        if parser_cls.detect(file_path):
-            return parser_cls(file_path)
-    raise ValueError("Neznámý typ logu nebo žádný vhodný parser.")
-
-def parse_file(file_path):
-    parser = get_parser_for_file(file_path)
-    return parser.parse()
+from .parsers import (
+    BaseLogParser,
+    Airdos04CLogParser,
+    OldLogParser,
+    get_parser_for_file,
+    parse_file,
+)
+from .eeprom_widget import EepromManagerWidget
+from .rtc_widget import RTCManagerWidget
+from .airdos04 import Airdos04Hardware, Airdos04Addresses
+from .loading_dialog import LoadingDialog, LoadingContext
 
 
 class LoadDataThread(QThread):
@@ -312,490 +109,57 @@ class PlotCanvas(pg.GraphicsLayoutWidget):
         if self.telemetry_lines[key] is not None:
             self.telemetry_lines[key].setVisible(value)
 
+import ft260
+FT260HidDriver = ft260.FT260_I2C
+# Enable verbose FT260 HID/I2C debugging
+try:
+    ft260.set_debug(True)
+except Exception as _e:
+    print(f"[dosview] Warning: could not enable ft260 debug: {_e}")
 
-class FT260HidDriver():
 
+class AIRDOS04CTRL(QThread):
     """
-    Key to symbols
-    ==============
-
-    S     (1 bit) : Start bit
-    P     (1 bit) : Stop bit
-    Rd/Wr (1 bit) : Read/Write bit. Rd equals 1, Wr equals 0.
-    A, NA (1 bit) : Accept and reverse accept bit.
-    Addr  (7 bits): I2C 7 bit address. Note that this can be expanded as usual to
-                    get a 10 bit I2C address.
-    Comm  (8 bits): Command byte, a data byte which often selects a register on
-                    the device.
-    Data  (8 bits): A plain data byte. Sometimes, I write DataLow, DataHigh
-                    for 16 bit data.
-    Count (8 bits): A data byte containing the length of a block operation.
-
-    [..]: Data sent by I2C device, as opposed to data sent by the host adapter.
-
-    More detail documentation is at https://www.kernel.org/doc/Documentation/i2c/smbus-protocol
+    Qt thread pro komunikaci s AIRDOS04 detektorem přes HID/I2C.
+    
+    Hardware operace jsou delegovány na Airdos04Hardware třídu.
+    Tento thread se stará o:
+    - HID připojení/odpojení
+    - Qt signály pro GUI
+    - Thread-safe volání hardware operací
     """
-
-    def __init__(self, port, device):
-        self.port = port
-        #self.smbus = smbus
-        self.driver_type = 'ft260_hid'
-        self.device = device
-        self.initialize_ftdi()
-    
-
-
-    def initialize_ftdi(self):
-        # TODO pripojeni k HID, nyni to mam jako self.device
-        
-        print(f'Device manufacturer: {self.device.get_manufacturer_string()}')
-        print(f'Product: {self.device.get_product_string()}')
-        print(f'Serial Number: {self.device.get_serial_number_string()}')
-
-        self.device.set_nonblocking(0)
-
-        self.reset_i2c()
-        #self.set_i2c_speed(100000) # 100 Khz
-        self.get_i2c_status()
-
-
-    def get_i2c_status(self):
-        d = self.device.get_feature_report(0xC0, 100)
-
-        status = ['busy_chip', 'error', 'no_ack', 'arbitration_lost', 'idle', 'busy_bus']
-        bits = [(d[1] & (1 << i)) >> i for i in range(8)]
-        status = dict(zip(status, bits))
-
-        baudrate = (d[2] | d[3]<<8)*1000
-        status['baudrate'] = baudrate
-
-        return status
-        
-    
-    def reset_i2c(self):
-        self.device.send_feature_report([0xA1, 0x20])
-        
-    def set_i2c_speed(self, speed = 100000):
-        speed = int(speed/1000)
-        LSB = (speed & 0xff)
-        MSB = (speed>>8 & 0xff)
-        print(f"Nastavit speed na {speed} Hz: ", hex(LSB), hex(MSB))
-        self.device.send_feature_report([0xA1, 0x22, LSB, MSB])
-
-
-    def write_byte(self, address, value):
-        """
-        SMBus Send Byte:  i2c_smbus_write_byte()
-        ========================================
-
-        This operation is the reverse of Receive Byte: it sends a single byte
-        to a device.  See Receive Byte for more information.
-
-        S Addr Wr [A] Data [A] P
-
-        Functionality flag: I2C_FUNC_SMBUS_WRITE_BYTE
-        """
-
-        payload = [0xD0, address, 0x06, 1, value]
-        self.device.write(payload)
-
-
-    def read_byte(self, address):
-        """
-        SMBus Send Byte:  i2c_smbus_write_byte()
-        ========================================
-
-        This operation is the reverse of Receive Byte: it sends a single byte
-        to a device.  See Receive Byte for more information.
-
-        S Addr Wr [A] Data [A] P
-
-        Functionality flag: I2C_FUNC_SMBUS_WRITE_BYTE
-        """
-        raise NotImplementedError
-
-    def write_byte_data(self, address, register, value):
-        """
-        SMBus Read Byte:  i2c_smbus_read_byte_data()
-        ============================================
-
-        This reads a single byte from a device, from a designated register.
-        The register is specified through the Comm byte.
-
-        S Addr Wr [A] Comm [A] S Addr Rd [A] [Data] NA P
-
-        Functionality flag: I2C_FUNC_SMBUS_READ_BYTE_DATA
-        """
-
-        return self.device.write([0xD0, address, 0x06, 2, register, value])
-
-
-    def read_byte_data(self, address, register):
-        """
-        SMBus Read Byte:  i2c_smbus_read_byte_data()
-        ============================================
-
-        This reads a single byte from a device, from a designated register.
-        The register is specified through the Comm byte.
-
-        S Addr Wr [A] Comm [A] S Addr Rd [A] [Data] NA P
-
-        Functionality flag: I2C_FUNC_SMBUS_READ_BYTE_DATA
-        """
-
-
-        payload = [0xD0, address, 0x06, 0b01, register]
-        self.device.write(payload)
-        length = (1).to_bytes(2, byteorder='little')
-        self.device.write([0xC2, address, 0x06, length[0], length[1]])
-        d = self.device.read(0xde)
-
-        # TODO: Osetrit chyby v chybnem vycteni registru
-        return d[2]
-
-
-    def write_word_data(self, address, register, value):
-        """
-        SMBus Write Word:  i2c_smbus_write_word_data()
-        ==============================================
-
-        This is the opposite of the Read Word operation. 16 bits
-        of data is written to a device, to the designated register that is
-        specified through the Comm byte.
-
-        S Addr Wr [A] Comm [A] DataLow [A] DataHigh [A] P
-
-        Functionality flag: I2C_FUNC_SMBUS_WRITE_WORD_DATA
-
-        Note the convenience function i2c_smbus_write_word_swapped is
-        available for writes where the two data bytes are the other way
-        around (not SMBus compliant, but very popular.)
-        """
-        return self.device.write([0xD0, address, 0x06, 3, register, (value)&0xff, (value>>8)&0xff ])
-
-    def read_word_data(self, address, register):
-        """
-        SMBus Read Word:  i2c_smbus_read_word_data()
-        ============================================
-
-        This operation is very like Read Byte; again, data is read from a
-        device, from a designated register that is specified through the Comm
-        byte. But this time, the data is a complete word (16 bits).
-
-        S Addr Wr [A] Comm [A] S Addr Rd [A] [DataLow] A [DataHigh] NA P
-
-        Functionality flag: I2C_FUNC_SMBUS_READ_WORD_DATA
-
-        Note the convenience function i2c_smbus_read_word_swapped is
-        available for reads where the two data bytes are the other way
-        around (not SMBus compliant, but very popular.)
-        """
-
-        payload = [0xD0, address, 0x06, 0b01, register]
-        self.device.write(payload)
-        length = (2).to_bytes(2, byteorder='little')
-        self.device.write([0xC2, address, 0x06, length[0], length[1]])
-        d = self.device.read(0xde)
-
-        # TODO: Osetrit chyby v chybnem vycteni registru
-        return d[2]<<8 | d[3]
-
-    def write_block_data(self, address, register, value):
-        """
-        SMBus Block Write:  i2c_smbus_write_block_data()
-        ================================================
-
-        The opposite of the Block Read command, this writes up to 32 bytes to
-        a device, to a designated register that is specified through the
-        Comm byte. The amount of data is specified in the Count byte.
-
-        S Addr Wr [A] Comm [A] Count [A] Data [A] Data [A] ... [A] Data [A] P
-
-        Functionality flag: I2C_FUNC_SMBUS_WRITE_BLOCK_DATA
-        """
-        raise NotImplementedError
-
-    def read_block_data(self, address, register):
-        """
-        SMBus Block Read:  i2c_smbus_read_block_data()
-        ==============================================
-
-        This command reads a block of up to 32 bytes from a device, from a
-        designated register that is specified through the Comm byte. The amount
-        of data is specified by the device in the Count byte.
-
-        S Addr Wr [A] Comm [A]
-                   S Addr Rd [A] [Count] A [Data] A [Data] A ... A [Data] NA P
-
-        Functionality flag: I2C_FUNC_SMBUS_READ_BLOCK_DATA
-        """
-        raise NotImplementedError
-
-    def block_process_call(self, address, register, value):
-        """
-        SMBus Block Write - Block Read Process Call
-        ===========================================
-
-        SMBus Block Write - Block Read Process Call was introduced in
-        Revision 2.0 of the specification.
-
-        This command selects a device register (through the Comm byte), sends
-        1 to 31 bytes of data to it, and reads 1 to 31 bytes of data in return.
-
-        S Addr Wr [A] Comm [A] Count [A] Data [A] ...
-                                     S Addr Rd [A] [Count] A [Data] ... A P
-
-        Functionality flag: I2C_FUNC_SMBUS_BLOCK_PROC_CALL
-        """
-        raise NotImplementedError
-
-    ### I2C transactions not compatible with pure SMBus driver
-    def write_i2c_block(self, address, value):
-        """
-        Simple send transaction
-        ======================
-
-        This corresponds to i2c_master_send.
-
-          S Addr Wr [A] Data [A] Data [A] ... [A] Data [A] P
-
-        More detail documentation is at: https://www.kernel.org/doc/Documentation/i2c/i2c-protocol
-        """
-        raise NotImplementedError
-
-    def read_i2c_block(self, address, length):
-        """
-        Simple receive transaction
-        ===========================
-
-        This corresponds to i2c_master_recv
-
-          S Addr Rd [A] [Data] A [Data] A ... A [Data] NA P
-
-        More detail documentation is at: https://www.kernel.org/doc/Documentation/i2c/i2c-protocol
-        """
-
-        payload = [0xc2, address, 0x06, length, 0]
-        self.device.write(payload)
-        data = self.device.read(0xde)
-
-        return data[2:data[1]+2]
-
-    def write_i2c_block_data(self, address, register, value):
-        """
-        I2C block transactions do not limit the number of bytes transferred
-        but the SMBus layer places a limit of 32 bytes.
-
-        I2C Block Write:  i2c_smbus_write_i2c_block_data()
-        ==================================================
-
-        The opposite of the Block Read command, this writes bytes to
-        a device, to a designated register that is specified through the
-        Comm byte. Note that command lengths of 0, 2, or more bytes are
-        supported as they are indistinguishable from data.
-
-        S Addr Wr [A] Comm [A] Data [A] Data [A] ... [A] Data [A] P
-
-        Functionality flag: I2C_FUNC_SMBUS_WRITE_I2C_BLOCK
-        """
-        
-        payload = [0xD0, address, 0x06, len(value) + 1, register] + value
-        self.device.write(payload)
-
-
-    def read_i2c_block_data(self, address, register, length):
-        """
-        I2C Block Read: i2c_smbus_read_i2c_block_data()
-        =================================================
-
-        Reads a block of bytes from a specific register in a device. It's the direct
-        opposite of the Block Write command, primarily used for retrieving a series
-        of bytes from a given register.
-
-        S Addr Wr [A] Comm [A] S Addr Rd [A] Data [A] Data [A] ... [A] Data [A] P
-
-        The method respects SMBus limitations of 32 bytes for block transactions.
-        """
-
-        timeout = 500
-
-        register = (register).to_bytes(2, byteorder='little')
-        payload = [0xD4, address, 0x02, 2, register[0], register[1]]
-        self.device.write(payload)
-        length = (length).to_bytes(2, byteorder='little')
-        self.device.write([0xC2, address, 0x07, length[0], length[1]])
-        d = self.device.read(0xde, timeout)
-
-        print(d)
-
-        return d[2:d[1]]
-
-    def write_i2c_block_data(self, address, register, data):
-        """
-        I2C Block Write: i2c_smbus_write_i2c_block_data()
-        =================================================
-
-        Writes a block of bytes to a specific register in a device. This command
-        is designed for direct I2C communication, allowing for command lengths of 0,
-        2, or more bytes, which are indistinguishable from data.
-
-        S Addr Wr [A] Comm [A] Data [A] Data [A] ... [A] Data [A] P
-
-        Functionality flag: I2C_FUNC_SMBUS_WRITE_I2C_BLOCK
-        """
-
-        register = (register).to_bytes(2, byteorder='little')
-        payload = [0xD4, address, 0x06, 0, register[0], register[1]] + data
-        payload[3] = len(payload) - 4
-        self.device.write(payload)
-
-        return True
-    
-
-
-
-class eeprom():
-    def __init__(self, bus, address):
-        self.bus = bus
-        self.address = address
-        
-    def read_serial_number(self):
-        serial_number = []
-        #self.bus.write_byte_data(self.address+8, 0x08, 0x00)
-        self.bus.write_byte_data(0x58, 0x08, 0x00)
-        for _ in range(16):
-            serial_byte = self.bus.read_byte(0x58)
-            serial_number.append(serial_byte)
-            print("Serial byte: ", serial_byte)
-        
-        result_number = 0
-        for b in serial_number:
-            result_number = (result_number << 8) | b
-
-        #devices.append(address)
-        return result_number
-
-    def read_eeprom(self, len):
-        serial_number = []
-        self.bus.write_byte_data(self.address, 0x00, 0x00)
-        for _ in range(len):
-            serial_byte = self.bus.read_byte(self.address)
-            serial_number.append(serial_byte)
-        
-        result_number = 0
-        for b in serial_number:
-            result_number = (result_number << 8) | b
-
-        #devices.append(address)
-        #return result_number
-        return serial_number
-
-    def write_to_eeprom(self, data, offset = 0):
-        mem_addr_b = offset & 0xff
-        mem_addr_a = (offset>>8) & 0xff
-
-        self.bus.write_i2c_block_data(address, mem_addr_a, [mem_addr_b]+data)
-
-
-class HIDI2CCommunicationThread(QThread):
     connected = pyqtSignal(bool)
     connect = pyqtSignal(bool)
     sendAirdosStatus = pyqtSignal(dict)
+    sendEepromData = pyqtSignal(dict)  # Signál pro EEPROM data
+    loadingStateChanged = pyqtSignal(bool, str)  # (is_loading, message)
 
-    #VID = 0x0403
-    #PID = 0x6030
+    # USB HID identifikace
     VID = 0x1209    
     PID = 0x7aa0
-    I2C_INTERFACE = 0
-
-
-    addr_switch = 0x70
-    addr_switch = 0x7c
-    addr_charger = 0x6a
-    addr_gauge = 0x55
-    addr_rtc = 0x51
-    addr_eeprom = 0x50
-    addr_eepromsn = 0x58
-
-    addr_sht = 0x44
-    addr_switch = 0x70
-    addr_sdcard = 0x71
-    addr_charger = 0x6a
-    addr_gauge = 0x55
-    addr_rtc = 0x51
-    addr_eeprom = 0x50
-    addr_eepromsn = 0x58
-    addr_altimet = 0x77
-    addr_an_sht = 0x45
-    addr_an_eeprom = 0x53
-    addr_an_eepromsn = 0x5b
 
     basic_params = {}
 
-    
-    # Příkazy pro čtení teploty a vlhkosti
-    temperature_cmd = [0x24, 0x00]  # Příkaz pro čtení teploty v režimu High Precision
-    humidity_cmd = [0x24, 0x16]     # Příkaz pro čtení vlhkosti v režimu High Precision
-    serial_number_cmd = [0x37, 0x80]
-
-
-
     dev = None
     ftdi = None
+    hw = None  # Airdos04Hardware instance
 
     def __init__(self):
         QThread.__init__(self)
-        # Initialize HID communication here
+        self.hw = None  # Will be set on connect
+        self.dev_uart = None
 
     def run(self):
-        # Implement HID communication logic here
-
-        # Connect to HID device
+        # Main thread loop
         self.connected.emit(False)
-        while 1:
+        while True:
             pass
-    
-
-    # Funkce pro čtení dat ze senzoru
-    def sht_read_sensor_data(self, address, cmd):
-        
-        register = (0x08).to_bytes(2, byteorder='little')
-        payload = [0xD4, address, 0x06, 2, cmd[0], cmd[1]]
-        self.dev.write(payload)
-        time.sleep(0.4)
-        length = (6).to_bytes(2, byteorder='little')
-        self.dev.write([0xC2, address, 0x06, length[0], length[1]])
-        data = self.dev.read(0xde, 1000)[2:]
-
-        print("... SHT data:", data)
-        raw_temperature = (data[0] << 8) + data[1]
-        raw_humidity = (data[3] << 8) + data[4]
-        temperature = -45 + 175 * (raw_temperature / 65535.0)  # Výpočet teploty
-        humidity = 100 * (raw_humidity / 65535.0)             # Výpočet vlhkosti
-        return temperature, humidity
-
-
-    def sht_read_sn(self, cmd):
-        self.ftdi.write_i2c_block_data(self.addr_sht, cmd[0], [cmd[1]])
-        data = self.ftdi.read_i2c_block_data(self.addr_sht, 0, 6)
-        print(data)
-        serial_number = (data[0] << 24) | (data[1] << 16) | (data[3] << 8) | data[4]
-        return serial_number
-    
-    def set_i2c_direction_to_usb(self, usb = True):
-        # Přepnout I2C switch na I2C z USB
-
-        if usb:
-            # Do usb se to prepne tak, ze bit[0] a bit[2] jsou rozdilne hodnoty, bit[1] a bit[3] jsou read-only
-            self.ftdi.write_byte_data(self.addr_switch, 0x01, 0b011)
-        else:
-            # I2C do ATMEGA se to prepne tak, ze bit[0] a bit[2] maji stejne hodnoty hodnoty
-            self.ftdi.write_byte_data(self.addr_switch, 0x01, 0b0000)
 
     @pyqtSlot()
-    def connectSlot(self, state = True, power_off = False):
+    def connectSlot(self, state=True, power_off=False):
         print("Connecting to HID device... ", state)
         if state:
+            self.loadingStateChanged.emit(True, "Connecting to device...")
 
             hid_interface_i2c = None
             hid_interface_uart = None
@@ -816,207 +180,91 @@ class HIDI2CCommunicationThread(QThread):
             self.dev_uart.open_path(hid_interface_uart['path'])
             print("Connected to HID device", self.dev, self.dev_uart)
 
+            self.loadingStateChanged.emit(True, "Initializing device...")
+            
             self.dev.send_feature_report([0xA1, 0x20])
             self.dev.send_feature_report([0xA1, 0x02, 0x01])
 
-            self.ftdi = FT260HidDriver(0, self.dev)
+            # Bind the already-open HID interface to the FT260_I2C driver
+            self.ftdi = FT260HidDriver(hid_device=self.dev)
 
+            # Inicializace Airdos04Hardware - Qt-nezávislé rozhraní pro hardware
+            self.hw = Airdos04Hardware(self.ftdi)
 
             # Přepnout I2C switch na I2C z USB
-            self.set_i2c_direction_to_usb(True)
+            self.hw.set_i2c_direction(to_usb=True)
 
+            # Povolit nabíjení
+            self.hw.enable_charging()
 
-            # self.ftdi.write_byte_data(self.addr_charger, 0x26, 0b10111000) # ????? 
-            self.ftdi.write_byte_data(self.addr_charger, 0x18, 0b00011000)
-
-
+            self.loadingStateChanged.emit(True, "Reading serial numbers...")
+            
+            # Vyčíst sériová čísla pomocí hw modulu
             print("AIRDOS SN ... ")
-            eeprom_data = self.ftdi.read_i2c_block_data(self.addr_eepromsn, 0x08, 18)
-            print(eeprom_data)
-            sn = 0
-            for s in eeprom_data:
-                sn = (sn << 8) | s
-            print(hex(sn))
-            self.basic_params['sn_batdatunit'] = hex(sn)
+            try:
+                self.basic_params['sn_batdatunit'] = self.hw.read_serial_number_batdatunit()
+                print(self.basic_params['sn_batdatunit'])
+            except Exception as e:
+                print(f"Error reading BatDatUnit SN: {e}")
+                self.basic_params['sn_batdatunit'] = "N/A"
 
-            eeprom_data = self.ftdi.read_i2c_block_data(self.addr_an_eepromsn, 0x08, 18)
-            print(eeprom_data)
-            sn = 0
-            for s in eeprom_data:
-                sn = (sn << 8) | s
-            print(hex(sn))
-            self.basic_params['sn_ustsipin'] = hex(sn)
+            try:
+                self.basic_params['sn_ustsipin'] = self.hw.read_serial_number_ustsipin()
+                print(self.basic_params['sn_ustsipin'])
+            except Exception as e:
+                print(f"Error reading USTSIPIN SN: {e}")
+                self.basic_params['sn_ustsipin'] = "N/A"
 
-            self.set_i2c_direction_to_usb(False)
+            self.hw.set_i2c_direction(to_usb=False)
 
 
             self.connected.emit(True)
+            
+            # Automaticky načíst data ze senzorů a EEPROM
+            self.get_all_data()
         
         else:
+            # Odpojení
+            if self.hw is not None:
+                self.hw.set_i2c_direction(to_usb=True)
+                
+                # Vypnout nabíječku pokud je požadováno
+                if power_off:
+                    self.hw.disable_charging_and_poweroff()
+                
+                self.hw.set_i2c_direction(to_usb=False)
             
-            self.set_i2c_direction_to_usb(True)
-
-            # Vypnout nabijecku pokud je pozadovano
-            if power_off:
-                self.ftdi.write_byte_data(self.addr_charger, 0x18, 0b00011010)
-            self.set_i2c_direction_to_usb(False)
-
-            self.dev.close()
-            self.dev_uart.close()
+            if self.dev is not None:
+                self.dev.close()
+            if hasattr(self, 'dev_uart') and self.dev_uart is not None:
+                self.dev_uart.close()
+            
             self.dev = None
+            self.dev_uart = None
             self.ftdi = None
+            self.hw = None
             self.connected.emit(False)
-
-    def get_time(self):        
-        # self.addr_rtc = 0x51
-        r00 = self.ftdi.read_byte_data(self.addr_rtc, 0x00)
-        r01 = self.ftdi.read_byte_data(self.addr_rtc, 0x01)
-        r02 = self.ftdi.read_byte_data(self.addr_rtc, 0x02)
-        r03 = self.ftdi.read_byte_data(self.addr_rtc, 0x03)
-        r04 = self.ftdi.read_byte_data(self.addr_rtc, 0x04)
-        r05 = self.ftdi.read_byte_data(self.addr_rtc, 0x05)
-        r06 = self.ftdi.read_byte_data(self.addr_rtc, 0x06)
-        r07 = self.ftdi.read_byte_data(self.addr_rtc, 0x07)
-
-        #r = self.ftdi.read_i2c_block_data(self.addr_rtc, 0x00, 8)
-        
-        sec100 = r00 & 0b1111 + ((r00 & 0b11110000) >> 4) * 10
-        absdate = datetime.datetime.now(datetime.timezone.utc)
-        sec = r01 & 0b1111 + ((r01 & 0b01110000) >> 4) * 10
-        minu= r02 & 0b1111 + ((r02 & 0b01110000) >> 4) * 10
-        hour = r03 & 0b1111 + ((r03 & 0b11110000) >> 4) * 10
-        hour += r04 & 0b1111 * 100 + ((r04 & 0b11110000) >> 4) * 1000
-        hour += r05 & 0b1111 * 10000 + ((r05 & 0b11110000) >> 4) * 100000
-        #hour = r03 + r04*100 + r05*10000
-
-        print("RTC data:", r00, r01, r02, r03, r04, r05, r06, r07)
-        print("RTC time: ", hour, minu, sec, sec100)
-
-        date_delta = datetime.timedelta(hours=hour, minutes=minu, seconds=sec, milliseconds=sec100*10)
-        
-        return(absdate, date_delta)
-    
-    def reset_time(self):
-        reset_time = datetime.datetime.now(datetime.timezone.utc)
-        
-        # self.ftdi.write_i2c_block_data(self.addr_rtc, 0x00, [0, 0, 0, 0, 0, 0, 0, 0])
-        
-        self.ftdi.write_byte_data(self.addr_rtc, 0x00, 0)
-        self.ftdi.write_byte_data(self.addr_rtc, 0x01, 0)
-        self.ftdi.write_byte_data(self.addr_rtc, 0x02, 0)
-        self.ftdi.write_byte_data(self.addr_rtc, 0x03, 0)
-        self.ftdi.write_byte_data(self.addr_rtc, 0x04, 0)
-        self.ftdi.write_byte_data(self.addr_rtc, 0x05, 0)
-        self.ftdi.write_byte_data(self.addr_rtc, 0x06, 0)
-        self.ftdi.write_byte_data(self.addr_rtc, 0x07, 0)
-
-        print("Time reseted at...", reset_time)
-
-
-    def get_battery(self):
-        ibus_adc = (self.ftdi.read_byte_data(self.addr_charger, 0x28) >> 1) * 2  
-        ibat_adc = (self.ftdi.read_byte_data(self.addr_charger, 0x2A) >> 2) * 4 
-        vbus_adc = (self.ftdi.read_byte_data(self.addr_charger, 0x2C) >> 2) * 3.97 / 1000
-        vpmid_adc= (self.ftdi.read_byte_data(self.addr_charger, 0x2E) >> 2) * 3.97 / 1000
-        vbat_adc = (self.ftdi.read_word_data(self.addr_charger, 0x30) >> 1) * 1.99 /1000  # VBAT ADC
-        vsys_adc = (self.ftdi.read_word_data(self.addr_charger, 0x32) >> 1) * 1.99 /1000 # VSYS ADC
-        tf_adc   = (self.ftdi.read_word_data(self.addr_charger, 0x34) >> 0) * 0.0961  # TF ADC
-        tdie_adc = (self.ftdi.read_word_data(self.addr_charger, 0x36) >> 0) * 0.5  # TDIE ADC
-
-        g_voltage = self.ftdi.read_word_data(self.addr_gauge, 0x08)
-        g_cur_avg = self.ftdi.read_word_data(self.addr_gauge, 0x0A)
-        g_cur_now = self.ftdi.read_word_data(self.addr_gauge, 0x10)
-        g_rem_cap = self.ftdi.read_word_data(self.addr_gauge, 0x04)
-        g_ful_cap = self.ftdi.read_word_data(self.addr_gauge, 0x06)
-        g_temp    = self.ftdi.read_word_data(self.addr_gauge, 0x0C)
-        g_state   = self.ftdi.read_word_data(self.addr_gauge, 0x02)
-
-
-        return {
-            'IBUS_ADC': ibus_adc,
-            'IBAT_ADC': ibat_adc,
-            'VBUS_ADC': vbus_adc,
-            'VPMID_ADC': vpmid_adc,
-            'VBAT_ADC': vbat_adc,
-            'VSYS_ADC': vsys_adc,
-            'TS_ADC': tf_adc,
-            'TDIE_ADC': tdie_adc
-        }, {
-            'VOLTAGE': g_voltage,
-            'CUR_AVG': g_cur_avg,
-            'CUR_NOW': g_cur_now,
-            'REM_CAP': g_rem_cap,
-            'FUL_CAP': g_ful_cap,
-            'TEMP': g_temp,
-            'STATE': g_state
-            
-        }
 
     @pyqtSlot()
     def get_airdos_status(self):
-
-        self.set_i2c_direction_to_usb(True)
-
-        abstime, sys_date = self.get_time()
-        charger, gauge = self.get_battery()
-
-        data = self.basic_params.copy()
-        data.update({
-            'RTC': {
-                'sys_time': sys_date,
-                'abs_time': abstime,
-                'sys_begin_time': abstime - sys_date
-            },
-            'CHARGER': charger,
-            'GAUGE': gauge
-        })
-
-        a,b = self.sht_read_sensor_data(self.addr_sht, [0x24, 0x0b] )
-        data['SHT'] = {
-            'temperature': a,
-            'humidity': b
-        }
-
-        a, b = self.sht_read_sensor_data(self.addr_an_sht, [0x24, 0x0b] )
-        data['AIRDOS_SHT'] = {
-            'temperature': a,
-            'humidity': b
-        }
-
-
-        data['ALTIMET'] = {}
-        data['ALTIMET']['calcoef'] = []
-        for value in range(0xa0, 0xae, 2):
-            self.ftdi.write_byte(self.addr_altimet, value)
-            # time.sleep(0.2)
-            # self.ftdi.write_byte(self.addr_altimet, 0)
-            time.sleep(0.1)
-            dat = self.ftdi.read_i2c_block(self.addr_altimet, 2)
-            time.sleep(0.1)
-            dat = dat[0] << 8 | dat[1]
-            data['ALTIMET']['calcoef'].append(dat)
-        time.sleep(0.2)
-            
-        self.ftdi.write_byte(self.addr_altimet, 0b01001000)
-        time.sleep(0.2)
-        self.ftdi.write_byte(self.addr_altimet, 0)
-        time.sleep(0.2)
-        hum = self.ftdi.read_i2c_block(self.addr_altimet, 3)
-        time.sleep(0.2)
-
-        self.ftdi.write_byte(self.addr_altimet, 0b01011000)
-        time.sleep(0.2)
-        self.ftdi.write_byte(self.addr_altimet, 0)
-        time.sleep(0.2)
-        temp = self.ftdi.read_i2c_block(self.addr_altimet, 3)
-        time.sleep(0.2)
-
-        data['ALTIMET'].update({
-            'altitude': hum[0] << 16 | hum[1] << 8 | hum[2],
-            'temperature': temp[0] << 16 | temp[1] << 8 | temp[2]
-        })
-
-        self.set_i2c_direction_to_usb(False)
+        """Vyčte kompletní stav AIRDOS04 a emituje signál s daty."""
+        if self.hw is None:
+            print("[I2C] Not connected; skipping status read")
+            return
+        
+        self.hw.set_i2c_direction(to_usb=True)
+        
+        try:
+            # Použijeme Airdos04Hardware.to_dict() pro kompatibilitu s původním API
+            data = self.hw.to_dict()
+            # Přidáme základní parametry (SN načtené při připojení)
+            data.update(self.basic_params)
+        except Exception as e:
+            print(f"[I2C] Error reading status: {e}")
+            data = self.basic_params.copy()
+        finally:
+            self.hw.set_i2c_direction(to_usb=False)
+        
         print("Posilam...", type(data))
         print(data)
         self.sendAirdosStatus.emit(data)
@@ -1024,9 +272,64 @@ class HIDI2CCommunicationThread(QThread):
 
     @pyqtSlot()
     def reset_rtc_time(self):
-        self.set_i2c_direction_to_usb(True)
-        self.reset_time()
-        self.set_i2c_direction_to_usb(False)
+        """Resetuje RTC stopky na nulu."""
+        if self.hw is None:
+            print("[I2C] Not connected; skipping RTC reset")
+            return
+        
+        self.hw.set_i2c_direction(to_usb=True)
+        try:
+            reset_time = self.hw.reset_rtc()
+            print(f"Time reset at: {reset_time}")
+        finally:
+            self.hw.set_i2c_direction(to_usb=False)
+
+    @pyqtSlot()
+    def get_all_data(self):
+        """Načte všechna data - senzory i EEPROM."""
+        self.loadingStateChanged.emit(True, "Načítání senzorů...")
+        self.get_airdos_status()
+        
+        self.loadingStateChanged.emit(True, "Načítání EEPROM...")
+        self.get_eeprom_data()
+        
+        self.loadingStateChanged.emit(False, "")
+
+    @pyqtSlot()
+    def get_eeprom_data(self):
+        """Vyčte EEPROM data z detektoru a baterie a emituje signál."""
+        if self.hw is None:
+            print("[I2C] Not connected; skipping EEPROM read")
+            return
+        
+        from .eeprom_schema import unpack_record, TOTAL_SIZE
+        
+        eeprom_data = {}
+        self.hw.set_i2c_direction(to_usb=True)
+        
+        try:
+            # EEPROM detektor
+            try:
+                det_data = self.hw.read_eeprom(TOTAL_SIZE, start_address=0, eeprom_address=self.hw.addr.eeprom)
+                det_record = unpack_record(det_data, verify_crc=False)
+                eeprom_data['detector'] = det_record.to_dict()
+            except Exception as e:
+                print(f"[EEPROM] Error reading detector EEPROM: {e}")
+                eeprom_data['detector'] = {'error': str(e)}
+            
+            # EEPROM baterie
+            try:
+                bat_data = self.hw.read_eeprom(TOTAL_SIZE, start_address=0, eeprom_address=self.hw.addr.eeprom_bat)
+                bat_record = unpack_record(bat_data, verify_crc=False)
+                eeprom_data['battery'] = bat_record.to_dict()
+            except Exception as e:
+                print(f"[EEPROM] Error reading battery EEPROM: {e}")
+                eeprom_data['battery'] = {'error': str(e)}
+                
+        finally:
+            self.hw.set_i2c_direction(to_usb=False)
+        
+        self.sendEepromData.emit(eeprom_data)
 
 class HIDUARTCommunicationThread(QThread):
     connected = pyqtSignal(bool)
@@ -1088,9 +391,11 @@ class AirdosConfigTab(QWidget):
     def __init__(self):
         super().__init__()
 
-        self.i2c_thread = HIDI2CCommunicationThread()
+        self.i2c_thread = AIRDOS04CTRL()
         self.i2c_thread.connected.connect(self.on_i2c_connected)  
         self.i2c_thread.sendAirdosStatus.connect(self.on_airdos_status)
+        self.i2c_thread.sendEepromData.connect(self.on_eeprom_data)
+        self.i2c_thread.loadingStateChanged.connect(self.on_loading_state)
         self.i2c_thread.start()
 
         #self.uart_thread = HIDUARTCommunicationThread().start()
@@ -1126,8 +431,35 @@ class AirdosConfigTab(QWidget):
         print("AIRDOS STATUS:")
         print(status)
 
+        self._update_tree_with_data(self.i2c_parameters_tree, status)
 
-        self.i2c_parameters_tree.clear()
+    def on_eeprom_data(self, eeprom_data):
+        """Handler pro EEPROM data."""
+        print("EEPROM DATA:")
+        print(eeprom_data)
+        
+        self._update_tree_with_data(self.eeprom_tree, eeprom_data)
+
+    def on_loading_state(self, is_loading: bool, message: str):
+        """Handler pro změnu stavu načítání."""
+        if is_loading:
+            # Zobrazit loading dialog
+            if not hasattr(self, '_loading_dialog') or self._loading_dialog is None:
+                self._loading_dialog = LoadingDialog(self, "Loading", message)
+                self._loading_dialog.start()
+            else:
+                self._loading_dialog.set_message(message)
+                if not self._loading_dialog.isVisible():
+                    self._loading_dialog.start()
+        else:
+            # Skrýt loading dialog
+            if hasattr(self, '_loading_dialog') and self._loading_dialog is not None:
+                self._loading_dialog.stop()
+                self._loading_dialog = None
+
+    def _update_tree_with_data(self, tree: QTreeWidget, data: dict):
+        """Aktualizuje tree widget s daty."""
+        tree.clear()
 
         def add_properties_to_tree(item, properties):
             for key, value in properties.items():
@@ -1135,19 +467,40 @@ class AirdosConfigTab(QWidget):
                     parent_item = QTreeWidgetItem([key])
                     item.addChild(parent_item)
                     add_properties_to_tree(parent_item, value)
+                elif isinstance(value, (list, tuple)):
+                    parent_item = QTreeWidgetItem([key, f"[{len(value)} items]"])
+                    item.addChild(parent_item)
+                    for i, v in enumerate(value):
+                        if isinstance(v, dict):
+                            child = QTreeWidgetItem([f"[{i}]"])
+                            parent_item.addChild(child)
+                            add_properties_to_tree(child, v)
+                        else:
+                            child = QTreeWidgetItem([f"[{i}]", str(v)])
+                            parent_item.addChild(child)
                 else:
                     child_item = QTreeWidgetItem([key, str(value)])
                     item.addChild(child_item)
 
-        for key, value in status.items():
-            print(key, value)
+        for key, value in data.items():
             if isinstance(value, dict):
                 parent_item = QTreeWidgetItem([key])
-                self.i2c_parameters_tree.addTopLevelItem(parent_item)
+                tree.addTopLevelItem(parent_item)
                 add_properties_to_tree(parent_item, value)
+            elif isinstance(value, (list, tuple)):
+                parent_item = QTreeWidgetItem([key, f"[{len(value)} items]"])
+                tree.addTopLevelItem(parent_item)
+                for i, v in enumerate(value):
+                    if isinstance(v, dict):
+                        child = QTreeWidgetItem([f"[{i}]"])
+                        parent_item.addChild(child)
+                        add_properties_to_tree(child, v)
+                    else:
+                        child = QTreeWidgetItem([f"[{i}]", str(v)])
+                        parent_item.addChild(child)
             else:
-                self.i2c_parameters_tree.addTopLevelItem(QTreeWidgetItem([key, str(value)]))
-        self.i2c_parameters_tree.expandAll()
+                tree.addTopLevelItem(QTreeWidgetItem([key, str(value)]))
+        tree.expandAll()
 
 
     def initUI(self):
@@ -1175,17 +528,48 @@ class AirdosConfigTab(QWidget):
         i2c_layout_row_1.addWidget(self.i2c_power_off_button)
         i2c_layout.addLayout(i2c_layout_row_1)
 
+        # Senzory tree
+        sensors_label = QLabel("📊 Senzory")
+        sensors_label.setStyleSheet("font-weight: bold; margin-top: 5px;")
+        i2c_layout.addWidget(sensors_label)
+        
         self.i2c_parameters_tree = QTreeWidget()
         self.i2c_parameters_tree.setHeaderLabels(["Parameter", "Value"])
         i2c_layout.addWidget(self.i2c_parameters_tree)
 
-        reload_button = QPushButton("Reload")
-        reload_button.clicked.connect(self.i2c_thread.get_airdos_status)
-        i2c_layout.addWidget(reload_button)
+        # EEPROM tree
+        eeprom_label = QLabel("💾 EEPROM")
+        eeprom_label.setStyleSheet("font-weight: bold; margin-top: 5px;")
+        i2c_layout.addWidget(eeprom_label)
+        
+        self.eeprom_tree = QTreeWidget()
+        self.eeprom_tree.setHeaderLabels(["Parameter", "Value"])
+        i2c_layout.addWidget(self.eeprom_tree)
 
-        reset_time_button = QPushButton("Reset time")
-        reset_time_button.clicked.connect(self.i2c_thread.reset_rtc_time)
-        i2c_layout.addWidget(reset_time_button)
+        # Řádek s akčními tlačítky
+        i2c_actions_row = QHBoxLayout()
+        
+        reload_button = QPushButton("🔄 Reload All")
+        reload_button.clicked.connect(self.i2c_thread.get_all_data)
+        i2c_actions_row.addWidget(reload_button)
+
+        rtc_button = QPushButton("⏱️ RTC Manager")
+        rtc_button.clicked.connect(self.open_rtc_manager)
+        i2c_actions_row.addWidget(rtc_button)
+        
+        i2c_layout.addLayout(i2c_actions_row)
+
+        # Řádek s EEPROM manager tlačítky
+        i2c_eeprom_row = QHBoxLayout()
+        
+        eeprom_det_btn = QPushButton("📀 EEPROM (detector)")
+        eeprom_bat_btn = QPushButton("🔋 EEPROM (battery)")
+        eeprom_det_btn.clicked.connect(self.open_eeprom_manager_detector)
+        eeprom_bat_btn.clicked.connect(self.open_eeprom_manager_battery)
+        i2c_eeprom_row.addWidget(eeprom_det_btn)
+        i2c_eeprom_row.addWidget(eeprom_bat_btn)
+        
+        i2c_layout.addLayout(i2c_eeprom_row)
 
         uart_widget = QGroupBox("UART")
         uart_layout = QVBoxLayout()
@@ -1196,25 +580,165 @@ class AirdosConfigTab(QWidget):
         uart_disconnect_button = QPushButton("Disconnect")
         uart_layout.addWidget(uart_connect_button)
         uart_layout.addWidget(uart_disconnect_button)
-
-        data_memory_widget = QGroupBox("Data memory")
-        data_memory_layout = QVBoxLayout()
-        data_memory_layout.setAlignment(Qt.AlignTop)
-        data_memory_widget.setLayout(data_memory_layout)
-        
-        data_memory_connect_button = QPushButton("Connect")
-        data_memory_disconnect_button = QPushButton("Disconnect")
-        data_memory_layout.addWidget(data_memory_connect_button)
-        data_memory_layout.addWidget(data_memory_disconnect_button)
-        
         
         splitter.addWidget(i2c_widget)
         splitter.addWidget(uart_widget)
-        splitter.addWidget(data_memory_widget)
         
         layout = QVBoxLayout()
         layout.addWidget(splitter)
         self.setLayout(layout)
+
+    def _open_eeprom_manager(self, read_addr: int):
+        def _log_eeprom(kind, message, data=None, *, full=False):
+            colors = {"read": "\x1b[32m", "write": "\x1b[33m", "info": "\x1b[36m"}
+            prefix = f"[EEPROM][{kind.upper()}]"
+            color = colors.get(kind, "")
+            reset = "\x1b[0m" if color else ""
+            print(f"{color}{prefix} {message}{reset}")
+            if data:
+                if full or len(data) <= 64:
+                    preview = " ".join(f"{b:02X}" for b in data)
+                    ellipsis = ""
+                else:
+                    preview = " ".join(f"{b:02X}" for b in data[:32])
+                    ellipsis = " ..."
+                print(f"{color}{prefix} DATA={preview}{ellipsis}{reset}")
+
+        if not self.i2c_thread or not self.i2c_thread.hw:
+            # Graceful fallback: demo mode without device
+            def read_device() -> bytes:
+                # Return empty 101-byte block (unprogrammed EEPROM = 0xFF)
+                _log_eeprom("info", "I2C není připojeno; spouštím demo mode")
+                _log_eeprom("read", "Demo mode: returning synthetic 0xFF block", data=b'\xFF' * 16)
+                return b'\xFF' * 101
+            def write_device(blob: bytes) -> None:
+                _log_eeprom(
+                    "write", f"Demo mode: would write {len(blob)} bytes", data=bytes(blob[:16])
+                )
+        else:
+            hw = self.i2c_thread.hw
+            
+            def read_device() -> bytes:
+                try:
+                    hw.set_i2c_direction(to_usb=True)
+                    _log_eeprom("read", f"Reading 101 bytes from EEPROM addr=0x{read_addr:02X}")
+                    
+                    # Debug: vyčíst SN
+                    try:
+                        sn = hw.read_serial_number(hw.addr.eeprom_sn)
+                        print(f"EEPROM SN: {hex(sn)}")
+                    except Exception as e:
+                        print(f"Warning: Could not read EEPROM SN: {e}")
+                    
+                    # Vyčíst data z EEPROM pomocí Airdos04Hardware
+                    data = hw.read_eeprom(101, start_address=0, eeprom_address=read_addr)
+                    _log_eeprom(
+                        "read",
+                        f"Total read {len(data)} bytes; sample={list(data[:8])}",
+                        data=bytes(data[:16]),
+                    )
+                    _log_eeprom("read", "Read sequence (all bytes)", data=bytes(data), full=True)
+                    return data
+                finally:
+                    hw.set_i2c_direction(to_usb=False)
+
+            def write_device(blob: bytes) -> None:
+                try:
+                    hw.set_i2c_direction(to_usb=True)
+                    _log_eeprom("write", f"Writing {len(blob)} bytes to addr=0x{read_addr:02X}", data=bytes(blob[:16]))
+                    _log_eeprom("write", "Write sequence (all bytes)", data=bytes(blob), full=True)
+                    
+                    success = hw.write_eeprom(blob, start_address=0, eeprom_address=read_addr)
+                    if success:
+                        _log_eeprom("write", "Write completed successfully")
+                    else:
+                        _log_eeprom("write", "Write failed!")
+                finally:
+                    hw.set_i2c_direction(to_usb=False)
+
+        dlg = QDialog(self)
+        dlg.setWindowTitle(f"EEPROM Manager (addr=0x{read_addr:02X})")
+        v = QVBoxLayout(dlg)
+
+        w = EepromManagerWidget(
+            read_device=read_device,
+            write_device=write_device,
+            io_context=self.i2c_thread,
+        )
+        v.addWidget(w)
+        btn_close = QPushButton("Zavřít")
+        btn_close.clicked.connect(dlg.accept)
+        v.addWidget(btn_close)
+        dlg.resize(900, 600)
+        dlg.exec_()
+
+    def open_eeprom_manager_detector(self):
+        """Otevře EEPROM manager pro analogovou desku (USTSIPIN)."""
+        if self.i2c_thread.hw:
+            self._open_eeprom_manager(self.i2c_thread.hw.addr.an_eeprom)
+        else:
+            self._open_eeprom_manager(0x53)  # fallback address
+
+    def open_eeprom_manager_battery(self):
+        """Otevře EEPROM manager pro BatDatUnit."""
+        if self.i2c_thread.hw:
+            self._open_eeprom_manager(self.i2c_thread.hw.addr.eeprom)
+        else:
+            self._open_eeprom_manager(0x50)  # fallback address
+
+    def open_rtc_manager(self):
+        """Otevře RTC manager pro správu hodin detektoru."""
+        if not self.i2c_thread or not self.i2c_thread.hw:
+            # Demo mode
+            QMessageBox.warning(
+                self,
+                "RTC Manager",
+                "I2C není připojeno. Připojte se k detektoru."
+            )
+            return
+        
+        hw = self.i2c_thread.hw
+        
+        def read_rtc():
+            try:
+                hw.set_i2c_direction(to_usb=True)
+                return hw.read_rtc()
+            finally:
+                hw.set_i2c_direction(to_usb=False)
+        
+        def reset_rtc():
+            try:
+                hw.set_i2c_direction(to_usb=True)
+                return hw.reset_rtc()
+            finally:
+                hw.set_i2c_direction(to_usb=False)
+        
+        def sync_rtc():
+            # Zapíše kalibrační bod do EEPROM (sync_time, sync_rtc_seconds)
+            try:
+                hw.set_i2c_direction(to_usb=True)
+                return hw.sync_rtc()
+            finally:
+                hw.set_i2c_direction(to_usb=False)
+        
+        dlg = QDialog(self)
+        dlg.setWindowTitle("RTC Manager - AIRDOS04")
+        v = QVBoxLayout(dlg)
+        
+        w = RTCManagerWidget(
+            read_rtc=read_rtc,
+            reset_rtc=reset_rtc,
+            sync_rtc=sync_rtc
+        )
+        w.show_raw_registers(True)
+        v.addWidget(w)
+        
+        btn_close = QPushButton("Zavřít")
+        btn_close.clicked.connect(dlg.accept)
+        v.addWidget(btn_close)
+        
+        dlg.resize(550, 550)
+        dlg.exec_()
 
 
 class DataSpectrumView(QWidget):
@@ -1423,7 +947,7 @@ class UploadFileDialog(QDialog):
         files = {"image": path}
         multi_part = self.construct_multipart(data, files)
         if multi_part:
-            url = QtCore.QUrl("http://127.0.0.1:8100/api/record/")
+            url = Qt.QUrl("http://127.0.0.1:8100/api/record/")
             request = QtNetwork.QNetworkRequest(url)
             reply = self._manager.post(request, multi_part)
             multi_part.setParent(reply)
