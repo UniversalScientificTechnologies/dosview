@@ -26,6 +26,7 @@ import os
 from .version import __version__
 from pyqtgraph import ImageView
 
+from .calibration_widget import CalibrationTab
 from .parsers import (
     BaseLogParser,
     Airdos04CLogParser,
@@ -1090,6 +1091,14 @@ class App(QMainWindow):
         else:
             self.stacked_container.setCurrentIndex(0)
 
+    def close_tab(self, index):
+        widget = self.tab_widget.widget(index)
+        if widget is None:
+            return
+        self.tab_widget.removeTab(index)
+        widget.deleteLater()
+        self.updateStackedWidget()
+
     def openPlotTab(self, file_path = None):
         plot_tab = PlotTab()
         if not file_path:
@@ -1144,6 +1153,7 @@ class App(QMainWindow):
 
         self.tab_widget.setCurrentIndex(0)
         self.tab_widget.setTabsClosable(True)
+        self.tab_widget.tabCloseRequested.connect(self.close_tab)
 
         bar = self.menuBar()
         file = bar.addMenu("&File")
