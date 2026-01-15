@@ -1078,6 +1078,10 @@ class App(QMainWindow):
             print("Oteviram zalozku s labdosem")
             self.openLabdosTab()
 
+        if self.args.calibration:
+            print("Oteviram zalozku s kalibraci")
+            self.openCalibrationTab()
+
     def updateStackedWidget(self):
         print("Updating stacked widget")
         print(self.tab_widget.count())
@@ -1109,6 +1113,12 @@ class App(QMainWindow):
     def openLabdosTab(self):
         labdos_tab = LabdosConfigTab()
         self.tab_widget.addTab(labdos_tab, "Labdos control")
+        self.tab_widget.setCurrentIndex(self.tab_widget.count() - 1)
+        self.updateStackedWidget()
+
+    def openCalibrationTab(self):
+        calibration_tab = CalibrationTab()
+        self.tab_widget.addTab(calibration_tab, "Calibration")
         self.tab_widget.setCurrentIndex(self.tab_widget.count() - 1)
         self.updateStackedWidget()
 
@@ -1159,6 +1169,10 @@ class App(QMainWindow):
         tools_labdosctrl.triggered.connect(self.action_switch_labdoscontrol)
         tools.addAction(tools_labdosctrl)
 
+        tool_calibration = QAction("Calibration", self)
+        tool_calibration.triggered.connect(self.action_switch_calibration)
+        tools.addAction(tool_calibration)
+
 
         help = bar.addMenu("&Help")
         doc = QAction("Documentation", self)
@@ -1191,6 +1205,9 @@ class App(QMainWindow):
     
     def action_switch_labdoscontrol(self):
         self.openLabdosTab()
+
+    def action_switch_calibration(self):
+        self.openCalibrationTab()
 
     import sys
     import datetime
@@ -1257,6 +1274,7 @@ def main():
     parser.add_argument('file_path', type=str, help='Path to the input file', default=False, nargs='?')
     parser.add_argument('--airdos', action='store_true', help='Enable airdos control tab')
     parser.add_argument('--labdos', action='store_true', help='Enable labdos control tab')
+    parser.add_argument('--calibration', action='store_true', help='Enable calibration tab')
     parser.add_argument('--no_gui', action='store_true', help='Disable GUI and run in headless mode')
     parser.add_argument('--version', action='store_true', help='Print version and exit')
     parser.add_argument('--new-window', action='store_true', help="Open file in new window")
