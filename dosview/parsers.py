@@ -29,6 +29,164 @@ class BaseLogParser:
         raise NotImplementedError
 
 
+def strip_optional_timestamp_prefix(line: str) -> tuple[str, str | None]:
+    """Return the payload without an optional ``@ISO8601,`` prefix."""
+    stripped = line.strip()
+    if not stripped:
+        return "", None
+    if stripped.startswith("@"):
+        timestamp, separator, payload = stripped.partition(",")
+        if separator and payload:
+            return payload, timestamp[1:]
+    return stripped, None
+
+
+def build_cached_delta_histogram(
+    events: Sequence[Tuple[int, int, int, int, int]],
+    primary_index: int,
+    secondary_index: int,
+):
+    """Build a cached 2D histogram for ``primary`` vs ``primary-secondary``."""
+    if not events:
+        return {
+            "matrix": np.zeros((0, 0), dtype=int),
+            "x_max": 0,
+            "delta_min": 0,
+            "delta_max": 0,
+        }
+
+    primary_values = [event[primary_index] for event in events]
+    delta_values = [event[primary_index] - event[secondary_index] for event in events]
+
+    x_max = max(primary_values)
+    delta_min = min(delta_values)
+    delta_max = max(delta_values)
+    matrix = np.zeros((x_max + 1, delta_max - delta_min + 1), dtype=int)
+
+    for primary_value, delta_value in zip(primary_values, delta_values):
+        matrix[primary_value, delta_value - delta_min] += 1
+
+    return {
+        "matrix": matrix,
+        "x_max": int(x_max),
+        "delta_min": int(delta_min),
+        "delta_max": int(delta_max),
+    }
+
+
+class CoincidenceLogParser(BaseLogParser):
+    """Parser for coincidence logs with ``$C`` records."""
+
+    @staticmethod
+    def detect(file_path: str | Path) -> bool:
+        with open(file_path, "r") as f:
+            for line in f:
+                payload, _timestamp = strip_optional_timestamp_prefix(line)
+                if payload.startswith("$C,"):
+                    return True
+        return False
+
+    def parse(self):
+        start_time = time.time()
+        events: List[Tuple[int, int, int, int, int]] = []
+        timestamped_lines = 0
+        first_timestamp = None
+        last_timestamp = None
+        metadata = {
+            "log_runs_count": 0,
+            "log_device_info": {},
+            "log_info": {},
+        }
+        type_counts = {0: 0, 1: 0, 2: 0, 3: 0}
+        max_channel = 0
+
+        with open(self.file_path, "r") as file:
+            for line in file:
+                payload, timestamp = strip_optional_timestamp_prefix(line)
+                if not payload:
+                    continue
+
+                if timestamp is not None:
+                    timestamped_lines += 1
+                    if first_timestamp is None:
+                        first_timestamp = timestamp
+                    last_timestamp = timestamp
+
+                parts = payload.split(",")
+                record_type = parts[0]
+
+                if record_type == "$DOS" and len(parts) >= 8:
+                    metadata["log_device_info"]["DOS"] = {
+                        "type": parts[0],
+                        "hw-model": parts[1],
+                        "fw-version": parts[2],
+                        "eeprom": parts[3],
+                        "fw-commit": parts[4],
+                        "fw-build_info": parts[5],
+                        "hw-sn": parts[6].strip(),
+                        "payload": parts[7].strip(),
+                    }
+                    metadata["log_runs_count"] += 1
+                    continue
+
+                if record_type != "$C" or len(parts) < 6:
+                    continue
+
+                try:
+                    coincidence_type = int(parts[1])
+                    val0 = int(parts[2])
+                    val0b = int(parts[3])
+                    val1 = int(parts[4])
+                    val1b = int(parts[5])
+                except ValueError:
+                    continue
+
+                events.append((coincidence_type, val0, val0b, val1, val1b))
+                type_counts[coincidence_type] = type_counts.get(coincidence_type, 0) + 1
+                max_channel = max(max_channel, val0, val0b, val1, val1b)
+
+        bins_count = max_channel + 1 if events else 1
+        histograms = {
+            "val0": np.zeros(bins_count, dtype=int),
+            "val0b": np.zeros(bins_count, dtype=int),
+            "val1": np.zeros(bins_count, dtype=int),
+            "val1b": np.zeros(bins_count, dtype=int),
+        }
+
+        for _coincidence_type, val0, val0b, val1, val1b in events:
+            histograms["val0"][val0] += 1
+            histograms["val0b"][val0b] += 1
+            histograms["val1"][val1] += 1
+            histograms["val1b"][val1b] += 1
+
+        delta_histograms = {
+            "val0": build_cached_delta_histogram(events, primary_index=1, secondary_index=2),
+            "val1": build_cached_delta_histogram(events, primary_index=3, secondary_index=4),
+        }
+
+        metadata["log_info"].update(
+            {
+                "log_type": "COINCIDENCE",
+                "log_type_version": "1.0",
+                "records_total": len(events),
+                "histogram_channels": bins_count,
+                "max_channel": int(max_channel),
+                "timestamped_lines": int(timestamped_lines),
+                "first_timestamp": first_timestamp or "",
+                "last_timestamp": last_timestamp or "",
+                "coincidence_type_counts": {str(key): int(value) for key, value in type_counts.items()},
+            }
+        )
+        print("Parsed COINCIDENCE format in", time.time() - start_time, "s")
+
+        return {
+            "events": events,
+            "histograms": histograms,
+            "delta_histograms": delta_histograms,
+            "metadata": metadata,
+        }
+
+
 class Airdos04CLogParser(BaseLogParser):
     """Parser for AIRDOS04C log files."""
 
@@ -203,7 +361,7 @@ class OldLogParser(BaseLogParser):
         return [time_column, sums, hist, metadata]
 
 
-LOG_PARSERS: Sequence[type[BaseLogParser]] = [Airdos04CLogParser, OldLogParser]
+LOG_PARSERS: Sequence[type[BaseLogParser]] = [CoincidenceLogParser, Airdos04CLogParser, OldLogParser]
 
 
 def get_parser_for_file(file_path: str | Path) -> BaseLogParser:
@@ -220,8 +378,11 @@ def parse_file(file_path: str | Path):
 
 __all__ = [
     "BaseLogParser",
+    "CoincidenceLogParser",
+    "build_cached_delta_histogram",
     "Airdos04CLogParser",
     "OldLogParser",
+    "strip_optional_timestamp_prefix",
     "get_parser_for_file",
     "parse_file",
 ]

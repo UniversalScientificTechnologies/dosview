@@ -36,6 +36,7 @@ dependencies = [
     "pandas",
     "pyqt5",
     "pyqtgraph",
+    "pyserial",
     "ft260",
 ]
 
@@ -57,4 +58,3 @@ repository = "https://github.com/UniversalScientificTechnologies/dosview/"
 github = "https://github.com/UniversalScientificTechnologies/dosview/"
 issues = "https://github.com/UniversalScientificTechnologies/dosview/issues"
 doccumentation = "https://docs.dos.ust.cz/dosview/"
-

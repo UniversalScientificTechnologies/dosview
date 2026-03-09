@@ -27,9 +27,11 @@ from .version import __version__
 from pyqtgraph import ImageView
 
 from .calibration_widget import CalibrationTab
+from .coincidence_widget import CoincidenceTab
 from .parsers import (
     BaseLogParser,
     Airdos04CLogParser,
+    CoincidenceLogParser,
     OldLogParser,
     get_parser_for_file,
     parse_file,
@@ -38,6 +40,13 @@ from .eeprom_widget import EepromManagerWidget
 from .rtc_widget import RTCManagerWidget
 from .airdos04 import Airdos04Hardware, Airdos04Addresses
 from .loading_dialog import LoadingDialog, LoadingContext
+from .live_view import (
+    LiveCircularBuffer,
+    list_serial_ports,
+    parse_serial_event_line,
+    serial,
+    serial_available,
+)
 
 
 class LoadDataThread(QThread):
@@ -355,6 +364,385 @@ class USBStorageMonitoringThread(QThread):
         pass
         # Implement USB storage monitoring logic here
 
+
+class SerialReaderThread(QThread):
+    connected = pyqtSignal(bool)
+    statusChanged = pyqtSignal(str)
+    errorOccurred = pyqtSignal(str)
+    eventsReceived = pyqtSignal(list)
+
+    def __init__(self, port, baudrate=115200, bins_count=1024):
+        super().__init__()
+        self.port = port
+        self.baudrate = int(baudrate)
+        self.bins_count = int(bins_count)
+        self._running = False
+        self._serial = None
+
+    def stop(self):
+        self._running = False
+
+    def run(self):
+        if serial is None:
+            self.errorOccurred.emit(
+                "pyserial is not available. Install dependency 'pyserial'."
+            )
+            self.connected.emit(False)
+            return
+
+        try:
+            self._serial = serial.Serial(
+                self.port,
+                self.baudrate,
+                timeout=0.2,
+            )
+        except Exception as e:
+            self.errorOccurred.emit(f"Cannot open serial port {self.port}: {e}")
+            self.connected.emit(False)
+            return
+
+        self._running = True
+        self.connected.emit(True)
+        self.statusChanged.emit(f"Connected: {self.port} @ {self.baudrate} Bd")
+
+        batch = []
+        last_emit = time.time()
+
+        while self._running:
+            try:
+                raw_line = self._serial.readline()
+            except Exception as e:
+                self.errorOccurred.emit(f"Serial read error: {e}")
+                break
+
+            if raw_line:
+                line = raw_line.decode("utf-8", errors="ignore").strip()
+                parsed = parse_serial_event_line(
+                    line,
+                    bins_count=self.bins_count,
+                    fallback_timestamp=time.time(),
+                )
+                if parsed is not None:
+                    batch.append(parsed)
+
+            now = time.time()
+            if batch and (len(batch) >= 128 or (now - last_emit) >= 0.2):
+                self.eventsReceived.emit(batch)
+                batch = []
+                last_emit = now
+
+        if batch:
+            self.eventsReceived.emit(batch)
+
+        try:
+            if self._serial is not None:
+                self._serial.close()
+        except Exception:
+            pass
+
+        self._serial = None
+        self.connected.emit(False)
+        self.statusChanged.emit("Disconnected")
+
+
+class LiveViewTab(QWidget):
+    def __init__(self):
+        super().__init__()
+        self.reader_thread = None
+        self.live_buffer = None
+        self.initUI()
+        self.refresh_serial_ports()
+        self.recreate_buffer()
+
+    def initUI(self):
+        root_layout = QVBoxLayout()
+        root_layout.setContentsMargins(8, 8, 8, 8)
+
+        controls_row = QHBoxLayout()
+
+        controls_row.addWidget(QLabel("Port"))
+        self.port_combo = QComboBox()
+        self.port_combo.setEditable(True)
+        self.port_combo.setMinimumWidth(170)
+        controls_row.addWidget(self.port_combo)
+
+        self.refresh_ports_button = QPushButton("Refresh ports")
+        self.refresh_ports_button.clicked.connect(self.refresh_serial_ports)
+        controls_row.addWidget(self.refresh_ports_button)
+
+        controls_row.addWidget(QLabel("Baud"))
+        self.baudrate_spin = QSpinBox()
+        self.baudrate_spin.setRange(1200, 4000000)
+        self.baudrate_spin.setValue(115200)
+        controls_row.addWidget(self.baudrate_spin)
+
+        controls_row.addWidget(QLabel("Bins"))
+        self.bins_spin = QSpinBox()
+        self.bins_spin.setRange(32, 4096)
+        self.bins_spin.setValue(1024)
+        controls_row.addWidget(self.bins_spin)
+
+        controls_row.addWidget(QLabel("Buffer [s]"))
+        self.buffer_seconds_spin = QSpinBox()
+        self.buffer_seconds_spin.setRange(9, 3600)
+        self.buffer_seconds_spin.setValue(300)
+        controls_row.addWidget(self.buffer_seconds_spin)
+
+        controls_row.addWidget(QLabel("Histogram [s]"))
+        self.window_seconds_spin = QSpinBox()
+        self.window_seconds_spin.setRange(1, 3600)
+        self.window_seconds_spin.setValue(30)
+        controls_row.addWidget(self.window_seconds_spin)
+
+        controls_row.addWidget(QLabel("Spectrum [s]"))
+        self.spectrum_seconds_spin = QSpinBox()
+        self.spectrum_seconds_spin.setRange(3, 3600)
+        self.spectrum_seconds_spin.setValue(120)
+        controls_row.addWidget(self.spectrum_seconds_spin)
+
+        self.connect_button = QPushButton("Connect")
+        self.connect_button.clicked.connect(self.start_live_reader)
+        controls_row.addWidget(self.connect_button)
+
+        self.disconnect_button = QPushButton("Disconnect")
+        self.disconnect_button.clicked.connect(self.stop_live_reader)
+        self.disconnect_button.setEnabled(False)
+        controls_row.addWidget(self.disconnect_button)
+
+        controls_row.addStretch(1)
+        root_layout.addLayout(controls_row)
+
+        self.format_hint = QLabel(
+            "Accepted frames: '$E,<timestamp>,<channel>,<bin>' or '<channel>,<bin>' "
+            "(channel: red/blue or 0/1)."
+        )
+        self.format_hint.setStyleSheet("color: #666;")
+        root_layout.addWidget(self.format_hint)
+
+        metrics_row = QHBoxLayout()
+        self.connection_status = QLabel("Disconnected")
+        self.connection_status.setStyleSheet("font-weight: bold; color: #a00;")
+        metrics_row.addWidget(self.connection_status)
+
+        self.total_rate_label = QLabel("Total rate: 0.00 part/s")
+        self.red_rate_label = QLabel("Red rate: 0.00 part/s")
+        self.blue_rate_label = QLabel("Blue rate: 0.00 part/s")
+        self.events_total_label = QLabel("Events in buffer: 0")
+        metrics_row.addWidget(self.total_rate_label)
+        metrics_row.addWidget(self.red_rate_label)
+        metrics_row.addWidget(self.blue_rate_label)
+        metrics_row.addWidget(self.events_total_label)
+        metrics_row.addStretch(1)
+        root_layout.addLayout(metrics_row)
+
+        self.histogram_plot = pg.PlotWidget()
+        self.histogram_plot.showGrid(x=True, y=True, alpha=0.25)
+        self.histogram_plot.setLabel("left", "Counts")
+        self.histogram_plot.setLabel("bottom", "Energy channel")
+        self.histogram_total_curve = self.histogram_plot.plot(
+            pen=pg.mkPen(color=(30, 30, 30), width=2),
+            name="total",
+        )
+        self.histogram_red_curve = self.histogram_plot.plot(
+            pen=pg.mkPen(color=(220, 20, 60), width=1),
+            name="red",
+        )
+        self.histogram_blue_curve = self.histogram_plot.plot(
+            pen=pg.mkPen(color=(30, 120, 240), width=1),
+            name="blue",
+        )
+        root_layout.addWidget(self.histogram_plot, stretch=2)
+
+        bottom_row = QHBoxLayout()
+
+        self.spectrum_plot = pg.PlotWidget()
+        self.spectrum_plot.showGrid(x=True, y=True, alpha=0.15)
+        self.spectrum_plot.setLabel("left", "Energy channel")
+        self.spectrum_plot.setLabel("bottom", "Time index in buffer [s]")
+        self.spectrum_image = pg.ImageItem()
+        self.spectrum_plot.addItem(self.spectrum_image)
+        bottom_row.addWidget(self.spectrum_plot, stretch=3)
+
+        self.grid_plot = pg.PlotWidget()
+        self.grid_plot.setFixedWidth(260)
+        self.grid_plot.setAspectLocked(True)
+        self.grid_plot.setLabel("left", "Y (3 samples)")
+        self.grid_plot.setLabel("bottom", "X (3 samples)")
+        self.grid_plot.showGrid(x=True, y=True, alpha=0.4)
+        self.grid_image = pg.ImageItem()
+        self.grid_plot.addItem(self.grid_image)
+        bottom_row.addWidget(self.grid_plot, stretch=1)
+
+        root_layout.addLayout(bottom_row, stretch=2)
+
+        self.bins_spin.valueChanged.connect(self.recreate_buffer)
+        self.buffer_seconds_spin.valueChanged.connect(self.recreate_buffer)
+        self.buffer_seconds_spin.valueChanged.connect(self._sync_window_limits)
+        self._sync_window_limits()
+
+        try:
+            lut = pg.colormap.get("viridis").getLookupTable(0.0, 1.0, 256)
+            self.spectrum_image.setLookupTable(lut)
+            self.grid_image.setLookupTable(lut)
+        except Exception:
+            pass
+
+        self.refresh_timer = QTimer(self)
+        self.refresh_timer.timeout.connect(self.refresh_live_plots)
+        self.refresh_timer.start(250)
+
+        self.setLayout(root_layout)
+
+    def _sync_window_limits(self):
+        max_seconds = self.buffer_seconds_spin.value()
+        self.window_seconds_spin.setMaximum(max_seconds)
+        self.spectrum_seconds_spin.setMaximum(max_seconds)
+        if self.window_seconds_spin.value() > max_seconds:
+            self.window_seconds_spin.setValue(max_seconds)
+        if self.spectrum_seconds_spin.value() > max_seconds:
+            self.spectrum_seconds_spin.setValue(max_seconds)
+
+    def recreate_buffer(self):
+        self.live_buffer = LiveCircularBuffer(
+            seconds_capacity=self.buffer_seconds_spin.value(),
+            bins_count=self.bins_spin.value(),
+        )
+        x_axis = np.arange(self.live_buffer.bins_count)
+        zeros = np.zeros(self.live_buffer.bins_count)
+        self.histogram_total_curve.setData(x_axis, zeros)
+        self.histogram_red_curve.setData(x_axis, zeros)
+        self.histogram_blue_curve.setData(x_axis, zeros)
+        self.refresh_live_plots()
+
+    def refresh_serial_ports(self):
+        self.port_combo.clear()
+        ports = list_serial_ports()
+        if not ports:
+            self.port_combo.addItem("/dev/ttyUSB0")
+        else:
+            self.port_combo.addItems(ports)
+
+    def _set_controls_enabled(self, enabled):
+        self.port_combo.setEnabled(enabled)
+        self.refresh_ports_button.setEnabled(enabled)
+        self.baudrate_spin.setEnabled(enabled)
+        self.bins_spin.setEnabled(enabled)
+        self.buffer_seconds_spin.setEnabled(enabled)
+
+    def start_live_reader(self):
+        if self.reader_thread is not None and self.reader_thread.isRunning():
+            return
+
+        if not serial_available():
+            self.connection_status.setText("Serial dependency missing (pyserial)")
+            self.connection_status.setStyleSheet("font-weight: bold; color: #a00;")
+            return
+
+        port = self.port_combo.currentText().strip()
+        if not port:
+            self.connection_status.setText("Select serial port first")
+            self.connection_status.setStyleSheet("font-weight: bold; color: #a00;")
+            return
+
+        self.recreate_buffer()
+        self._set_controls_enabled(False)
+
+        self.reader_thread = SerialReaderThread(
+            port=port,
+            baudrate=self.baudrate_spin.value(),
+            bins_count=self.bins_spin.value(),
+        )
+        self.reader_thread.connected.connect(self.on_reader_connected)
+        self.reader_thread.statusChanged.connect(self.on_reader_status)
+        self.reader_thread.errorOccurred.connect(self.on_reader_error)
+        self.reader_thread.eventsReceived.connect(self.on_serial_events)
+        self.reader_thread.start()
+        self.connect_button.setEnabled(False)
+        self.disconnect_button.setEnabled(True)
+
+    def stop_live_reader(self):
+        if self.reader_thread is None:
+            self.connect_button.setEnabled(True)
+            self.disconnect_button.setEnabled(False)
+            self._set_controls_enabled(True)
+            return
+
+        self.reader_thread.stop()
+        self.reader_thread.wait(1200)
+        self.reader_thread = None
+        self.connect_button.setEnabled(True)
+        self.disconnect_button.setEnabled(False)
+        self._set_controls_enabled(True)
+
+    def on_reader_connected(self, connected):
+        if connected:
+            self.connection_status.setText("Connected")
+            self.connection_status.setStyleSheet("font-weight: bold; color: #070;")
+        else:
+            self.connection_status.setText("Disconnected")
+            self.connection_status.setStyleSheet("font-weight: bold; color: #a00;")
+
+    def on_reader_status(self, text):
+        self.connection_status.setText(text)
+        if "disconnect" in text.lower():
+            self.connection_status.setStyleSheet("font-weight: bold; color: #a00;")
+        else:
+            self.connection_status.setStyleSheet("font-weight: bold; color: #070;")
+
+    def on_reader_error(self, error_text):
+        self.connection_status.setText(error_text)
+        self.connection_status.setStyleSheet("font-weight: bold; color: #a00;")
+        self.stop_live_reader()
+
+    def on_serial_events(self, events):
+        if self.live_buffer is None:
+            return
+        for ts, channel, energy_bin in events:
+            self.live_buffer.add_event(ts, channel, energy_bin)
+
+    def refresh_live_plots(self):
+        if self.live_buffer is None:
+            return
+
+        hist_seconds = self.window_seconds_spin.value()
+        hist_red = self.live_buffer.get_histogram(hist_seconds, channel=0)
+        hist_blue = self.live_buffer.get_histogram(hist_seconds, channel=1)
+        hist_total = hist_red + hist_blue
+        x_axis = np.arange(self.live_buffer.bins_count)
+
+        self.histogram_total_curve.setData(x_axis, hist_total)
+        self.histogram_red_curve.setData(x_axis, hist_red)
+        self.histogram_blue_curve.setData(x_axis, hist_blue)
+
+        counts = self.live_buffer.get_channel_counts(hist_seconds)
+        total_count = int(counts[0] + counts[1])
+        red_rate = float(counts[0]) / max(1, hist_seconds)
+        blue_rate = float(counts[1]) / max(1, hist_seconds)
+        total_rate = float(total_count) / max(1, hist_seconds)
+        self.red_rate_label.setText(f"Red rate: {red_rate:.2f} part/s")
+        self.blue_rate_label.setText(f"Blue rate: {blue_rate:.2f} part/s")
+        self.total_rate_label.setText(f"Total rate: {total_rate:.2f} part/s")
+        buffer_counts = self.live_buffer.get_channel_counts(self.live_buffer.seconds_capacity)
+        self.events_total_label.setText(f"Events in buffer: {int(buffer_counts[0] + buffer_counts[1])}")
+
+        spectrum_seconds = self.spectrum_seconds_spin.value()
+        spectrum = self.live_buffer.get_spectrogram(spectrum_seconds)
+        spectrum_img = np.where(spectrum > 0, spectrum, np.nan)
+        self.spectrum_image.setImage(spectrum_img.T, autoLevels=False)
+        max_spectrum = float(np.nanmax(spectrum_img)) if np.any(~np.isnan(spectrum_img)) else 1.0
+        self.spectrum_image.setLevels((0.0, max(1.0, max_spectrum)))
+        self.spectrum_image.setRect(QRectF(0, 0, spectrum_seconds, self.live_buffer.bins_count))
+
+        grid = self.live_buffer.get_recent_3x3_grid().astype(float)
+        grid_img = np.where(grid > 0, grid, np.nan)
+        self.grid_image.setImage(grid_img.T, autoLevels=False)
+        max_grid = float(np.nanmax(grid_img)) if np.any(~np.isnan(grid_img)) else 1.0
+        self.grid_image.setLevels((0.0, max(1.0, max_grid)))
+        self.grid_image.setRect(QRectF(0, 0, 3, 3))
+
+    def cleanup(self):
+        self.stop_live_reader()
+        self.refresh_timer.stop()
 
 
 class LabdosConfigTab(QWidget):
@@ -1061,6 +1449,8 @@ class App(QMainWindow):
 
         self.plot_tab = None
         self.airdos_tab = None
+        self.live_tab = None
+        self.coincidence_tab = None
 
         self.solve_startup_args()
 
@@ -1083,6 +1473,10 @@ class App(QMainWindow):
             print("Oteviram zalozku s kalibraci")
             self.openCalibrationTab()
 
+        if getattr(self.args, "live", False):
+            print("Oteviram zalozku live-view")
+            self.openLiveViewTab()
+
     def updateStackedWidget(self):
         print("Updating stacked widget")
         print(self.tab_widget.count())
@@ -1095,20 +1489,30 @@ class App(QMainWindow):
         widget = self.tab_widget.widget(index)
         if widget is None:
             return
+        if hasattr(widget, "cleanup"):
+            widget.cleanup()
         self.tab_widget.removeTab(index)
         widget.deleteLater()
         self.updateStackedWidget()
 
     def openPlotTab(self, file_path = None):
-        plot_tab = PlotTab()
         if not file_path:
             file_path = self.args.file_path
         print("Oteviram log.. ", file_path)
-        
-        plot_tab.open_file(file_path)
+
+        parser = get_parser_for_file(file_path)
+        if isinstance(parser, CoincidenceLogParser):
+            coincidence_tab = CoincidenceTab()
+            coincidence_tab.open_file(file_path)
+            opened_tab = coincidence_tab
+        else:
+            plot_tab = PlotTab()
+            plot_tab.open_file(file_path)
+            opened_tab = plot_tab
+
         file_name = os.path.basename(file_path)
-        
-        self.tab_widget.addTab(plot_tab, f"{file_name}")
+
+        self.tab_widget.addTab(opened_tab, f"{file_name}")
         self.tab_widget.setCurrentIndex(self.tab_widget.count() - 1)
         self.updateStackedWidget()
 
@@ -1131,12 +1535,32 @@ class App(QMainWindow):
         self.tab_widget.setCurrentIndex(self.tab_widget.count() - 1)
         self.updateStackedWidget()
 
+    def openLiveViewTab(self):
+        live_tab = LiveViewTab()
+        self.tab_widget.addTab(live_tab, "Live view")
+        self.tab_widget.setCurrentIndex(self.tab_widget.count() - 1)
+        self.updateStackedWidget()
+
+    def openCoincidenceTab(self, file_path=None):
+        coincidence_tab = CoincidenceTab()
+        if file_path:
+            coincidence_tab.open_file(file_path)
+            title = os.path.basename(file_path)
+        else:
+            title = "Coincidence view"
+        self.tab_widget.addTab(coincidence_tab, title)
+        self.tab_widget.setCurrentIndex(self.tab_widget.count() - 1)
+        self.updateStackedWidget()
+
     def blank_page(self):
         # This is widget for blank page
         # When no tab is opened
         widget = QWidget()
         layout = QVBoxLayout()
-        label = QLabel("No tab is opened yet. Open a file or enable airdos control.", alignment=Qt.AlignCenter)
+        label = QLabel(
+            "No tab is opened yet. Open a file, enable airdos control, or start live view.",
+            alignment=Qt.AlignCenter,
+        )
         layout.addWidget(label)
         widget.setLayout(layout)
         return widget
@@ -1183,6 +1607,14 @@ class App(QMainWindow):
         tool_calibration.triggered.connect(self.action_switch_calibration)
         tools.addAction(tool_calibration)
 
+        tool_live_view = QAction("LiveView", self)
+        tool_live_view.triggered.connect(self.action_switch_liveview)
+        tools.addAction(tool_live_view)
+
+        tool_coincidence_view = QAction("CoincidenceView", self)
+        tool_coincidence_view.triggered.connect(self.action_switch_coincidenceview)
+        tools.addAction(tool_coincidence_view)
+
 
         help = bar.addMenu("&Help")
         doc = QAction("Documentation", self)
@@ -1218,6 +1650,12 @@ class App(QMainWindow):
 
     def action_switch_calibration(self):
         self.openCalibrationTab()
+
+    def action_switch_liveview(self):
+        self.openLiveViewTab()
+
+    def action_switch_coincidenceview(self):
+        self.openCoincidenceTab()
 
     import sys
     import datetime
@@ -1274,6 +1712,10 @@ class App(QMainWindow):
     
     def closeEvent(self, event):
         print("Closing dosview...")
+        for idx in range(self.tab_widget.count()):
+            widget = self.tab_widget.widget(idx)
+            if hasattr(widget, "cleanup"):
+                widget.cleanup()
         self.settings.setValue("geometry", self.saveGeometry())
         self.settings.setValue("windowState", self.saveState())
         event.accept()
@@ -1281,10 +1723,11 @@ class App(QMainWindow):
 
 def main():
     parser = argparse.ArgumentParser(description='Process some integers.')
-    parser.add_argument('file_path', type=str, help='Path to the input file', default=False, nargs='?')
+    parser.add_argument('file_path', type=str, help='Path to the input file', default="", nargs='?')
     parser.add_argument('--airdos', action='store_true', help='Enable airdos control tab')
     parser.add_argument('--labdos', action='store_true', help='Enable labdos control tab')
     parser.add_argument('--calibration', action='store_true', help='Enable calibration tab')
+    parser.add_argument('--live', action='store_true', help='Enable live serial view tab')
     parser.add_argument('--no_gui', action='store_true', help='Disable GUI and run in headless mode')
     parser.add_argument('--version', action='store_true', help='Print version and exit')
     parser.add_argument('--new-window', action='store_true', help="Open file in new window")
@@ -1306,13 +1749,29 @@ def main():
     server_name = 'dosview'
     socket = QLocalSocket()
     socket.connectToServer(server_name)
+
+    ipc_messages = []
+    if args.file_path:
+        ipc_messages.append(f"FILE:{args.file_path}")
+    if args.airdos:
+        ipc_messages.append("CMD:AIRDOS")
+    if args.labdos:
+        ipc_messages.append("CMD:LABDOS")
+    if args.calibration:
+        ipc_messages.append("CMD:CALIBRATION")
+    if args.live:
+        ipc_messages.append("CMD:LIVE")
+    ipc_payload = "\n".join(ipc_messages)
     
     if socket.waitForConnected(500):
-        socket.write(args.file_path.encode())
-        socket.flush()
-        socket.waitForBytesWritten(1000)
+        if ipc_payload:
+            socket.write(ipc_payload.encode())
+            socket.flush()
+            socket.waitForBytesWritten(1000)
+            print("dosview is already running. Sending command to the running instance.")
+        else:
+            print("dosview is already running.")
         socket.disconnectFromServer()
-        print("dosview is already running. Sending file path to the running instance.")
         sys.exit(0)
     else:
         server = QLocalServer()
@@ -1321,9 +1780,26 @@ def main():
         def handle_connection():
             socket = server.nextPendingConnection()
             if socket.waitForReadyRead(1000):
-                filename = socket.readAll().data().decode()
-                print("Opening file from external instance startup ...", filename)
-                ex.openPlotTab(filename)
+                payload = socket.readAll().data().decode().strip()
+                if not payload:
+                    return
+                print("External instance command ...", payload)
+                for item in payload.splitlines():
+                    if item.startswith("FILE:"):
+                        filename = item[len("FILE:"):]
+                        if filename:
+                            ex.openPlotTab(filename)
+                    elif item == "CMD:AIRDOS":
+                        ex.openAirdosTab()
+                    elif item == "CMD:LABDOS":
+                        ex.openLabdosTab()
+                    elif item == "CMD:CALIBRATION":
+                        ex.openCalibrationTab()
+                    elif item == "CMD:LIVE":
+                        ex.openLiveViewTab()
+                    elif item:
+                        # Backward compatibility for old instances sending plain file path.
+                        ex.openPlotTab(item)
                 ex.activateWindow()
                 ex.raise_()
                 ex.setFocus()

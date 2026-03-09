@@ -94,17 +94,20 @@ class CalibrationTab(QWidget):
         logs_buttons = QHBoxLayout()
         add_log_button = QPushButton("Add CSV")
         add_log_button.clicked.connect(self.add_csv_logs)
+        reload_log_button = QPushButton("Reload logs")
+        reload_log_button.clicked.connect(self.reload_logs)
         remove_log_button = QPushButton("Remove")
         remove_log_button.clicked.connect(self.remove_selected_logs)
         logs_buttons.addWidget(add_log_button)
+        logs_buttons.addWidget(reload_log_button)
         logs_buttons.addWidget(remove_log_button)
         logs_layout.addLayout(logs_buttons)
         logs_group.setLayout(logs_layout)
 
         points_group = QGroupBox("Channel-to-energy")
         points_layout = QVBoxLayout()
-        self.channel_energy_table = QTableWidget(0, 3)
-        self.channel_energy_table.setHorizontalHeaderLabels(["Channel", "Energy", "Label"])
+        self.channel_energy_table = QTableWidget(0, 4)
+        self.channel_energy_table.setHorizontalHeaderLabels(["Channel", "Energy [keV]", "LET [keV/um]", "Label"])
         self.channel_energy_table.horizontalHeader().setStretchLastSection(True)
         self.channel_energy_table.setSelectionBehavior(QAbstractItemView.SelectRows)
         self.channel_energy_table.itemChanged.connect(self.on_channel_energy_item_changed)
@@ -127,31 +130,59 @@ class CalibrationTab(QWidget):
         self.slope_spin.setDecimals(8)
         self.slope_spin.setValue(1.0)
         self.slope_spin.valueChanged.connect(self.update_energy_lines)
+        # TODO: Pole pro nepřesnosti bylo odebráno z UI kvůli úspoře místa
+        # Hodnoty slope_err, offset_err a thickness_err jsou zachovány v kódu a vynulovány
+        self.slope_err_spin = QDoubleSpinBox()
+        self.slope_err_spin.setRange(0, 1e9)
+        self.slope_err_spin.setDecimals(8)
+        self.slope_err_spin.setValue(0.0)
+        self.slope_err_spin.setVisible(False)  # Skryté pole
         self.offset_spin = QDoubleSpinBox()
         self.offset_spin.setRange(-1e9, 1e9)
         self.offset_spin.setDecimals(8)
         self.offset_spin.setValue(0.0)
         self.offset_spin.valueChanged.connect(self.update_energy_lines)
+        self.offset_err_spin = QDoubleSpinBox()
+        self.offset_err_spin.setRange(0, 1e9)
+        self.offset_err_spin.setDecimals(8)
+        self.offset_err_spin.setValue(0.0)
+        self.offset_err_spin.setVisible(False)  # Skryté pole
+        self.thickness_spin = QDoubleSpinBox()
+        self.thickness_spin.setRange(-1e9, 1e9)
+        self.thickness_spin.setDecimals(8)
+        self.thickness_spin.setValue(0.0)
+        self.thickness_err_spin = QDoubleSpinBox()
+        self.thickness_err_spin.setRange(0, 1e9)
+        self.thickness_err_spin.setDecimals(8)
+        self.thickness_err_spin.setValue(0.0)
+        self.thickness_err_spin.setVisible(False)  # Skryté pole
         constants_layout.addRow("Slope a (energy/channel)", self.slope_spin)
         constants_layout.addRow("Offset b (energy)", self.offset_spin)
-        estimate_button = QPushButton("Estimate calibration constants")
+        constants_layout.addRow("w (dead thickness um)", self.thickness_spin)
+        
+        buttons_layout = QHBoxLayout()
+        estimate_button = QPushButton("Method 1: Linear fit")
         estimate_button.clicked.connect(self.estimate_calibration)
-        constants_layout.addRow(estimate_button)
+        estimate_button_let = QPushButton("Method 2: LET-based")
+        estimate_button_let.clicked.connect(self.estimate_calibration_let)
+        buttons_layout.addWidget(estimate_button)
+        buttons_layout.addWidget(estimate_button_let)
+        constants_layout.addRow(buttons_layout)
         constants_group.setLayout(constants_layout)
-
-        energy_group = QGroupBox("Selected energies")
+        
+        energy_group = QGroupBox("Bookmarks")
         energy_layout = QVBoxLayout()
-        self.energy_table = QTableWidget(0, 2)
-        self.energy_table.setHorizontalHeaderLabels(["Energy", "Element"])
+        self.energy_table = QTableWidget(0, 4)
+        self.energy_table.setHorizontalHeaderLabels(["Channel", "Energy [keV]", "LET [keV/um]", "Label"])
         self.energy_table.horizontalHeader().setStretchLastSection(True)
         self.energy_table.setSelectionBehavior(QAbstractItemView.SelectRows)
         self.energy_table.itemChanged.connect(self.on_energy_item_changed)
         energy_layout.addWidget(self.energy_table)
 
         energy_buttons = QHBoxLayout()
-        add_energy_button = QPushButton("Add energy")
+        add_energy_button = QPushButton("Add bookmark")
         add_energy_button.clicked.connect(self.add_energy_row)
-        remove_energy_button = QPushButton("Remove energy")
+        remove_energy_button = QPushButton("Remove bookmark")
         remove_energy_button.clicked.connect(self.remove_selected_energy_rows)
         import_energy_button = QPushButton("Import to channel-to-energy")
         import_energy_button.clicked.connect(self.import_selected_energies)
@@ -176,6 +207,8 @@ class CalibrationTab(QWidget):
         self.save_plot_button.clicked.connect(self.save_plot)
         self.matplotlib_button = QPushButton("Show as matplotlib")
         self.matplotlib_button.clicked.connect(self.show_matplotlib)
+        self.plot_calib_button = QPushButton("Plot calibration curve")
+        self.plot_calib_button.clicked.connect(self.plot_calibration_curve)
         self.log_scale_checkbox = QCheckBox("Log Y")
         self.log_scale_checkbox.toggled.connect(self.update_plot)
         self.show_energy_checkbox = QCheckBox("Show energy")
@@ -184,6 +217,7 @@ class CalibrationTab(QWidget):
         self.cursor_label = QLabel("Ch: --  E: -- keV")
         plot_controls.addWidget(self.save_plot_button)
         plot_controls.addWidget(self.matplotlib_button)
+        plot_controls.addWidget(self.plot_calib_button)
         plot_controls.addStretch(1)
         plot_controls.addWidget(self.show_energy_checkbox)
         plot_controls.addWidget(self.log_scale_checkbox)
@@ -279,6 +313,19 @@ class CalibrationTab(QWidget):
             self.log_table.removeRow(row)
         self.update_plot()
 
+    def reload_logs(self):
+        failed_paths = []
+        for file_path in list(self.log_data.keys()):
+            try:
+                channels, counts = self.load_csv_counts(file_path)
+                self.log_data[file_path] = {"channels": channels, "counts": counts}
+            except Exception as exc:
+                failed_paths.append((file_path, str(exc)))
+        self.update_plot()
+        if failed_paths:
+            error_msg = "Failed to reload:\n" + "\n".join([f"{path}: {err}" for path, err in failed_paths])
+            QMessageBox.warning(self, "Reload logs error", error_msg)
+
     def on_log_item_changed(self, item):
         if self._suppress_log_item_changed:
             return
@@ -322,6 +369,7 @@ class CalibrationTab(QWidget):
         self.channel_energy_table.setItem(row, 0, QTableWidgetItem("0"))
         self.channel_energy_table.setItem(row, 1, QTableWidgetItem(""))
         self.channel_energy_table.setItem(row, 2, QTableWidgetItem(""))
+        self.channel_energy_table.setItem(row, 3, QTableWidgetItem(""))
         self._suppress_channel_energy_item_changed = False
         self.channel_energy_lines.append(None)
         self.sync_channel_energy_lines()
@@ -341,11 +389,11 @@ class CalibrationTab(QWidget):
             return
         if item is None:
             return
-        if item.column() == 2:
+        if item.column() == 3:
             self.update_channel_energy_line_label(item.row())
             self.update_line_label_positions()
             return
-        if item.column() != 0:
+        if item.column() not in (0, 1, 2):
             return
         row = item.row()
         channel = None
@@ -394,7 +442,7 @@ class CalibrationTab(QWidget):
             self.plot_widget.addItem(line)
 
     def channel_energy_label_text(self, row):
-        label_item = self.channel_energy_table.item(row, 2)
+        label_item = self.channel_energy_table.item(row, 3)
         if label_item is None:
             return ""
         return label_item.text().strip()
@@ -487,9 +535,120 @@ class CalibrationTab(QWidget):
         if len(channels) < 2:
             QMessageBox.information(self, "Calibration", "Add at least two channel-energy points.")
             return
+        
+        channels = np.array(channels)
+        energies = np.array(energies)
+        
         slope, offset = np.polyfit(channels, energies, 1)
+        
+        # Výpočet nejistot z reziduí
+        predicted = slope * channels + offset
+        residuals = energies - predicted
+        n = len(channels)
+        
+        if n > 2:
+            residual_std = np.std(residuals, ddof=2)
+            mean_ch = np.mean(channels)
+            ss_xx = np.sum((channels - mean_ch)**2)
+            
+            slope_err = residual_std * np.sqrt(1 / ss_xx)
+            offset_err = residual_std * np.sqrt(1/n + mean_ch**2 / ss_xx)
+        else:
+            slope_err = 0.0
+            offset_err = 0.0
+        
         self.slope_spin.setValue(slope)
         self.offset_spin.setValue(offset)
+        self.slope_err_spin.setValue(slope_err)
+        self.offset_err_spin.setValue(offset_err)
+        self.update_energy_lines()
+
+    def estimate_calibration_let(self):
+        """Calibration method using LET values for all points.
+        
+        Solves: E0_i = CH_i * k + LET_i * w
+        where k is keV/channel and w is thickness in um
+        """
+        channels = []
+        energies_keV = []
+        Sp_keV_per_um = []
+        
+        for row in range(self.channel_energy_table.rowCount()):
+            channel_item = self.channel_energy_table.item(row, 0)
+            energy_item = self.channel_energy_table.item(row, 1)
+            let_item = self.channel_energy_table.item(row, 2)
+            
+            if channel_item is None or energy_item is None or let_item is None:
+                continue
+            
+            try:
+                channel = float(channel_item.text())
+                energy = float(energy_item.text())
+                let_value = float(let_item.text())
+            except ValueError:
+                continue
+            
+            channels.append(channel)
+            energies_keV.append(energy)
+            Sp_keV_per_um.append(let_value)
+        
+        if len(channels) < 2:
+            QMessageBox.information(self, "Calibration", "Add at least two channel-energy points with LET values.")
+            return
+        
+        # Check that all LET values are present
+        if any(let_val == 0 or let_val is None for let_val in Sp_keV_per_um):
+            QMessageBox.warning(self, "Calibration", "All points must have non-zero LET values.")
+            return
+        
+        channels = np.array(channels)
+        energies_keV = np.array(energies_keV)
+        Sp_keV_per_um = np.array(Sp_keV_per_um)
+        
+        # Build linear system: [CH_i  Sp_i] [k] = [E0_i]
+        A = np.column_stack([channels, Sp_keV_per_um])
+        y = energies_keV
+        
+        result = np.linalg.lstsq(A, y, rcond=None)
+        k, w = result[0]
+        
+        kev_per_channel = k
+        thickness_um = w
+        
+        # Výpočet nejistot z reziduí
+        predicted = A @ np.array([k, w])
+        residuals = y - predicted
+        n = len(channels)
+        
+        if n > 2:
+            residual_std = np.std(residuals, ddof=2)
+            # Kovariační matice: (A^T A)^-1 * sigma^2
+            try:
+                cov_matrix = np.linalg.inv(A.T @ A) * (residual_std ** 2)
+                k_err = np.sqrt(cov_matrix[0, 0])
+                w_err = np.sqrt(cov_matrix[1, 1])
+            except np.linalg.LinAlgError:
+                k_err = 0.0
+                w_err = 0.0
+        else:
+            k_err = 0.0
+            w_err = 0.0
+        
+        # Set slope (keV/channel), offset to 0, and thickness
+        self.slope_spin.setValue(kev_per_channel)
+        self.slope_err_spin.setValue(k_err)
+        self.offset_spin.setValue(0.0)
+        self.offset_err_spin.setValue(0.0)
+        self.thickness_spin.setValue(thickness_um)
+        self.thickness_err_spin.setValue(w_err)
+        
+        QMessageBox.information(
+            self,
+            "Calibration (Method 2: LET-based)",
+            f"Calibration complete:\n"
+            f"k (keV/channel) = {kev_per_channel:.8g} ± {k_err:.8g}\n"
+            f"w (thickness um) = {thickness_um:.8g} ± {w_err:.8g}"
+        )
         self.update_energy_lines()
 
     def get_calibration_coeffs(self) -> Tuple[float, float]:
@@ -508,34 +667,48 @@ class CalibrationTab(QWidget):
         self._suppress_energy_item_changed = True
         self.energy_table.setRowCount(0)
         for entry in entries:
+            channel_text = ""
             energy_text = ""
+            let_text = ""
             element_text = ""
             checked = True
             if isinstance(entry, dict):
+                channel_text = "" if entry.get("channel") is None else str(entry.get("channel"))
                 energy_text = "" if entry.get("energy") is None else str(entry.get("energy"))
+                let_text = "" if entry.get("let") is None else str(entry.get("let"))
                 element_text = "" if entry.get("element") is None else str(entry.get("element"))
                 checked = bool(entry.get("checked", True))
             row = self.energy_table.rowCount()
             self.energy_table.insertRow(row)
+            channel_item = QTableWidgetItem(channel_text)
+            channel_item.setFlags(channel_item.flags() | Qt.ItemIsUserCheckable)
+            channel_item.setCheckState(Qt.Checked if checked else Qt.Unchecked)
             energy_item = QTableWidgetItem(energy_text)
-            energy_item.setFlags(energy_item.flags() | Qt.ItemIsUserCheckable)
-            energy_item.setCheckState(Qt.Checked if checked else Qt.Unchecked)
+            let_item = QTableWidgetItem(let_text)
             element_item = QTableWidgetItem(element_text)
-            self.energy_table.setItem(row, 0, energy_item)
-            self.energy_table.setItem(row, 1, element_item)
+            self.energy_table.setItem(row, 0, channel_item)
+            self.energy_table.setItem(row, 1, energy_item)
+            self.energy_table.setItem(row, 2, let_item)
+            self.energy_table.setItem(row, 3, element_item)
         self._suppress_energy_item_changed = False
         self.update_energy_lines()
 
     def save_energy_config(self):
         entries = []
         for row in range(self.energy_table.rowCount()):
-            energy_item = self.energy_table.item(row, 0)
-            element_item = self.energy_table.item(row, 1)
+            channel_item = self.energy_table.item(row, 0)
+            energy_item = self.energy_table.item(row, 1)
+            let_item = self.energy_table.item(row, 2)
+            element_item = self.energy_table.item(row, 3)
+            channel_text = channel_item.text().strip() if channel_item else ""
             energy_text = energy_item.text().strip() if energy_item else ""
+            let_text = let_item.text().strip() if let_item else ""
             element_text = element_item.text().strip() if element_item else ""
-            checked = energy_item.checkState() == Qt.Checked if energy_item else True
+            checked = channel_item.checkState() == Qt.Checked if channel_item else True
             entries.append({
+                "channel": channel_text,
                 "energy": energy_text,
+                "let": let_text,
                 "element": element_text,
                 "checked": checked,
             })
@@ -544,13 +717,17 @@ class CalibrationTab(QWidget):
     def add_energy_row(self):
         row = self.energy_table.rowCount()
         self.energy_table.insertRow(row)
-        energy_item = QTableWidgetItem("0.0")
-        energy_item.setFlags(energy_item.flags() | Qt.ItemIsUserCheckable)
-        energy_item.setCheckState(Qt.Checked)
-        element_item = QTableWidgetItem("")
+        channel_item = QTableWidgetItem("")
+        channel_item.setFlags(channel_item.flags() | Qt.ItemIsUserCheckable)
+        channel_item.setCheckState(Qt.Checked)
+        energy_item = QTableWidgetItem("")
+        let_item = QTableWidgetItem("")
+        label_item = QTableWidgetItem("")
         self._suppress_energy_item_changed = True
-        self.energy_table.setItem(row, 0, energy_item)
-        self.energy_table.setItem(row, 1, element_item)
+        self.energy_table.setItem(row, 0, channel_item)
+        self.energy_table.setItem(row, 1, energy_item)
+        self.energy_table.setItem(row, 2, let_item)
+        self.energy_table.setItem(row, 3, label_item)
         self._suppress_energy_item_changed = False
         self.save_energy_config()
         self.update_energy_lines()
@@ -578,8 +755,9 @@ class CalibrationTab(QWidget):
         slope = self.slope_spin.value()
         offset = self.offset_spin.value()
         for row in rows:
-            energy_item = self.energy_table.item(row, 0)
-            element_item = self.energy_table.item(row, 1)
+            energy_item = self.energy_table.item(row, 1)
+            let_item = self.energy_table.item(row, 2)
+            label_item = self.energy_table.item(row, 3)
             if energy_item is None:
                 continue
             try:
@@ -595,8 +773,10 @@ class CalibrationTab(QWidget):
             self._suppress_channel_energy_item_changed = True
             self.channel_energy_table.setItem(new_row, 0, QTableWidgetItem(str(channel)))
             self.channel_energy_table.setItem(new_row, 1, QTableWidgetItem(str(energy)))
-            label_text = element_item.text().strip() if element_item else ""
-            self.channel_energy_table.setItem(new_row, 2, QTableWidgetItem(label_text))
+            let_text = let_item.text().strip() if let_item else ""
+            self.channel_energy_table.setItem(new_row, 2, QTableWidgetItem(let_text))
+            label_text = label_item.text().strip() if label_item else ""
+            self.channel_energy_table.setItem(new_row, 3, QTableWidgetItem(label_text))
             self._suppress_channel_energy_item_changed = False
             self.channel_energy_lines.append(None)
         self.sync_channel_energy_lines()
@@ -619,21 +799,27 @@ class CalibrationTab(QWidget):
         for row in range(self.channel_energy_table.rowCount()):
             channel_item = self.channel_energy_table.item(row, 0)
             energy_item = self.channel_energy_table.item(row, 1)
-            label_item = self.channel_energy_table.item(row, 2)
+            let_item = self.channel_energy_table.item(row, 2)
+            label_item = self.channel_energy_table.item(row, 3)
             channel_energy.append({
                 "channel": channel_item.text().strip() if channel_item else "",
                 "energy": energy_item.text().strip() if energy_item else "",
+                "let": let_item.text().strip() if let_item else "",
                 "label": label_item.text().strip() if label_item else "",
             })
 
         selected_energies = []
         for row in range(self.energy_table.rowCount()):
-            energy_item = self.energy_table.item(row, 0)
-            element_item = self.energy_table.item(row, 1)
+            channel_item = self.energy_table.item(row, 0)
+            energy_item = self.energy_table.item(row, 1)
+            let_item = self.energy_table.item(row, 2)
+            label_item = self.energy_table.item(row, 3)
             selected_energies.append({
+                "channel": channel_item.text().strip() if channel_item else "",
                 "energy": energy_item.text().strip() if energy_item else "",
-                "element": element_item.text().strip() if element_item else "",
-                "checked": energy_item.checkState() == Qt.Checked if energy_item else True,
+                "let": let_item.text().strip() if let_item else "",
+                "element": label_item.text().strip() if label_item else "",
+                "checked": channel_item.checkState() == Qt.Checked if channel_item else True,
             })
 
         return {
@@ -643,7 +829,11 @@ class CalibrationTab(QWidget):
             "selected_energies": selected_energies,
             "constants": {
                 "slope": self.slope_spin.value(),
+                "slope_error": self.slope_err_spin.value(),
                 "offset": self.offset_spin.value(),
+                "offset_error": self.offset_err_spin.value(),
+                "thickness": self.thickness_spin.value(),
+                "thickness_error": self.thickness_err_spin.value(),
             },
             "log_scale": self.log_scale_checkbox.isChecked(),
         }
@@ -695,25 +885,34 @@ class CalibrationTab(QWidget):
             self._suppress_channel_energy_item_changed = True
             self.channel_energy_table.setItem(row, 0, QTableWidgetItem(str(entry.get("channel", ""))))
             self.channel_energy_table.setItem(row, 1, QTableWidgetItem(str(entry.get("energy", ""))))
-            self.channel_energy_table.setItem(row, 2, QTableWidgetItem(str(entry.get("label", ""))))
+            self.channel_energy_table.setItem(row, 2, QTableWidgetItem(str(entry.get("let", ""))))
+            self.channel_energy_table.setItem(row, 3, QTableWidgetItem(str(entry.get("label", ""))))
             self._suppress_channel_energy_item_changed = False
             self.channel_energy_lines.append(None)
 
         for entry in data.get("selected_energies", []):
             row = self.energy_table.rowCount()
             self.energy_table.insertRow(row)
+            channel_item = QTableWidgetItem(str(entry.get("channel", "")))
+            channel_item.setFlags(channel_item.flags() | Qt.ItemIsUserCheckable)
+            channel_item.setCheckState(Qt.Checked if entry.get("checked", True) else Qt.Unchecked)
             energy_item = QTableWidgetItem(str(entry.get("energy", "")))
-            energy_item.setFlags(energy_item.flags() | Qt.ItemIsUserCheckable)
-            energy_item.setCheckState(Qt.Checked if entry.get("checked", True) else Qt.Unchecked)
+            let_item = QTableWidgetItem(str(entry.get("let", "")))
             element_item = QTableWidgetItem(str(entry.get("element", "")))
             self._suppress_energy_item_changed = True
-            self.energy_table.setItem(row, 0, energy_item)
-            self.energy_table.setItem(row, 1, element_item)
+            self.energy_table.setItem(row, 0, channel_item)
+            self.energy_table.setItem(row, 1, energy_item)
+            self.energy_table.setItem(row, 2, let_item)
+            self.energy_table.setItem(row, 3, element_item)
             self._suppress_energy_item_changed = False
 
         constants = data.get("constants", {})
         self.slope_spin.setValue(float(constants.get("slope", self.slope_spin.value())))
+        self.slope_err_spin.setValue(float(constants.get("slope_error", self.slope_err_spin.value())))
         self.offset_spin.setValue(float(constants.get("offset", self.offset_spin.value())))
+        self.offset_err_spin.setValue(float(constants.get("offset_error", self.offset_err_spin.value())))
+        self.thickness_spin.setValue(float(constants.get("thickness", self.thickness_spin.value())))
+        self.thickness_err_spin.setValue(float(constants.get("thickness_error", self.thickness_err_spin.value())))
         self.log_scale_checkbox.setChecked(bool(data.get("log_scale", False)))
 
         self.save_energy_config()
@@ -823,23 +1022,49 @@ class CalibrationTab(QWidget):
             self.plot_widget.removeItem(line)
         self.energy_lines = []
         slope = self.slope_spin.value()
-        if slope == 0:
-            return
         offset = self.offset_spin.value()
+
         for row in range(self.energy_table.rowCount()):
-            energy_item = self.energy_table.item(row, 0)
-            if energy_item is None:
+            channel_item = self.energy_table.item(row, 0)
+            if channel_item is None:
                 continue
-            if energy_item.checkState() != Qt.Checked:
+            if channel_item.checkState() != Qt.Checked:
                 continue
-            element_item = self.energy_table.item(row, 1)
-            element = element_item.text().strip() if element_item else ""
+            energy_item = self.energy_table.item(row, 1)
+            label_item = self.energy_table.item(row, 3)
+            label = label_item.text().strip() if label_item else ""
+
+            channel = None
+            energy = None
             try:
-                energy = float(energy_item.text())
+                ch_text = channel_item.text().strip()
+                if ch_text:
+                    channel = float(ch_text)
             except ValueError:
+                pass
+            try:
+                en_text = energy_item.text().strip() if energy_item else ""
+                if en_text:
+                    energy = float(en_text)
+            except ValueError:
+                pass
+
+            # Determine line position: energy has priority, fallback to channel
+            if energy is not None and slope != 0:
+                channel = (energy - offset) / slope
+            elif channel is None:
                 continue
-            channel = (energy - offset) / slope
-            label_text = f"{element} {energy:g}".strip() if element else f"{energy:g}"
+
+            # Build label
+            if label and energy is not None:
+                label_text = f"{label} {energy:g}"
+            elif energy is not None:
+                label_text = f"{energy:g}"
+            elif label:
+                label_text = label
+            else:
+                label_text = f"Ch {channel:g}"
+
             line = pg.InfiniteLine(
                 pos=channel,
                 angle=90,
@@ -1005,6 +1230,10 @@ class CalibrationTab(QWidget):
         energy_axis.xaxis.set_label_position("bottom")
         energy_axis.spines["bottom"].set_position(("outward", 40))
         energy_axis.spines["top"].set_visible(False)
+        
+        slope_err = self.slope_err_spin.value()
+        offset_err = self.offset_err_spin.value()
+        
         if slope == 0:
             energy_min = offset - 0.5
             energy_max = offset + 0.5
@@ -1013,12 +1242,106 @@ class CalibrationTab(QWidget):
             energy_max = slope * channel_max + offset
         if energy_min > energy_max:
             energy_min, energy_max = energy_max, energy_min
+        
+        if slope_err > 0 or offset_err > 0:
+            channel_range_unc = np.linspace(channel_min, channel_max, 100)
+            energy_upper = (slope + slope_err) * channel_range_unc + (offset + offset_err)
+            energy_lower = (slope - slope_err) * channel_range_unc + (offset - offset_err)
+            energy_axis.fill_between(channel_range_unc, energy_lower, energy_upper,
+                                    alpha=0.15, color='blue', label='±1σ uncertainty',
+                                    transform=ax.transData)
+        
         energy_axis.set_xlim(energy_min, energy_max)
         energy_axis.set_xlabel("Energy (keV)")
         energy_axis.tick_params(axis="x", pad=2)
         energy_axis.grid(True, axis="x", color="0.85", linestyle="-")
         offset_sign = "+" if offset >= 0 else "-"
-        ax.set_title(f"Dosimeter calibration: E [keV] = {slope:.6g}*ch {offset_sign} {abs(offset):.6g}")
+        thickness = self.thickness_spin.value()
+        thickness_err = self.thickness_err_spin.value()
+        if thickness_err > 0:
+            ax.set_title(f"Dosimeter calibration: E [keV] = {slope:.6g}*ch {offset_sign} {abs(offset):.6g} | w = {thickness:.6g} ± {thickness_err:.6g} um")
+        else:
+            ax.set_title(f"Dosimeter calibration: E [keV] = {slope:.6g}*ch {offset_sign} {abs(offset):.6g} | w = {thickness:.6g} um")
+        fig.tight_layout()
+        fig.canvas.draw_idle()
+        plt.show()
+
+    def plot_calibration_curve(self):
+        """Plot calibration curve (channel vs energy) with calibration points up to channel 255."""
+        try:
+            import matplotlib.pyplot as plt
+        except Exception as exc:
+            QMessageBox.warning(self, "Matplotlib missing", f"Failed to import matplotlib: {exc}")
+            return
+        
+        # Get calibration coefficients
+        slope, offset = self.get_calibration_coeffs()
+        slope_err = self.slope_err_spin.value()
+        offset_err = self.offset_err_spin.value()
+        
+        # Collect calibration points
+        channels = []
+        energies = []
+        labels = []
+        for row in range(self.channel_energy_table.rowCount()):
+            channel_item = self.channel_energy_table.item(row, 0)
+            energy_item = self.channel_energy_table.item(row, 1)
+            label_item = self.channel_energy_table.item(row, 3)
+            
+            if channel_item is None or energy_item is None:
+                continue
+            
+            try:
+                channel = float(channel_item.text())
+                energy = float(energy_item.text())
+            except ValueError:
+                continue
+            
+            channels.append(channel)
+            energies.append(energy)
+            labels.append(label_item.text().strip() if label_item else "")
+        
+        if not channels:
+            QMessageBox.information(self, "Calibration curve", "No calibration points available.")
+            return
+        
+        # Create plot
+        fig, ax = plt.subplots(figsize=(10, 6))
+        
+        # Plot calibration curve from 0 to 255
+        channel_range = np.linspace(0, 255, 256)
+        energy_range = slope * channel_range + offset
+        ax.plot(channel_range, energy_range, "b-", linewidth=2, label="Calibration curve")
+        
+        # Plot uncertainty band
+        if slope_err > 0 or offset_err > 0:
+            energy_upper = (slope + slope_err) * channel_range + (offset + offset_err)
+            energy_lower = (slope - slope_err) * channel_range + (offset - offset_err)
+            ax.fill_between(channel_range, energy_lower, energy_upper,
+                           alpha=0.15, color='blue', label='±1σ uncertainty')
+        
+        # Plot calibration points
+        ax.scatter(channels, energies, color="red", s=100, zorder=5, label="Calibration points")
+        
+        # Add labels for each point
+        for ch, en, lbl in zip(channels, energies, labels):
+            if lbl:
+                ax.annotate(lbl, xy=(ch, en), xytext=(5, 5), textcoords="offset points", fontsize=9)
+        
+        ax.set_xlabel("Channel")
+        ax.set_ylabel("Energy (keV)")
+        ax.set_xlim(0, 255)
+        ax.grid(True, alpha=0.3)
+        ax.legend()
+        
+        offset_sign = "+" if offset >= 0 else "-"
+        thickness = self.thickness_spin.value()
+        thickness_err = self.thickness_err_spin.value()
+        if thickness_err > 0:
+            ax.set_title(f"Channel vs Energy: E [keV] = {slope:.6g}*ch {offset_sign} {abs(offset):.6g} | w = {thickness:.6g} ± {thickness_err:.6g} um")
+        else:
+            ax.set_title(f"Channel vs Energy: E [keV] = {slope:.6g}*ch {offset_sign} {abs(offset):.6g} | w = {thickness:.6g} um")
+        
         fig.tight_layout()
         fig.canvas.draw_idle()
         plt.show()

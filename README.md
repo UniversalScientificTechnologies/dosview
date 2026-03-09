@@ -12,6 +12,7 @@
 - **Fast Performance**: Optimized for quick loading and smooth scrolling through large log files.
 - **Cross-Platform Compatibility**: Works on any platform that supports Python and Qt.
 - **Callable from gui**: Dosimeter file can be opened from graphical file browser. 
+- **Live View (serial)**: Real-time histogram/rate/spectrum from serial event stream.
 
 ## Installation
 Dosview can be installed using several methods. Below are the instructions for each:
@@ -62,6 +63,21 @@ dosview <filename>
 ```
 
 Replace `<filename>` with the path to the log file you wish to view.
+
+Live mode can be started from CLI as:
+```
+dosview --live
+```
+
+Expected serial event frame format:
+```
+$E,<timestamp>,<channel>,<bin>
+```
+or short form:
+```
+<channel>,<bin>
+```
+where channel is `red/blue` or `0/1`.
 
 
 ## Configuration
