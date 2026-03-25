@@ -29,38 +29,43 @@ class BaseLogParser:
         raise NotImplementedError
 
 
-class Airdos04CLogParser(BaseLogParser):
-    """Parser for AIRDOS04C log files."""
+class AirdosV2LogParser(BaseLogParser):
+    """Parser for AIRDOS log files using data format version 2.x."""
 
     @staticmethod
     def detect(file_path: str | Path) -> bool:
         with open(file_path, "r") as f:
             for line in f:
-                if line.startswith("$DOS") and "AIRDOS04C" in line:
-                    return True
+                if line.startswith("$DOS"):
+                    parts = line.strip().split(",")
+                    # parts[2] = fw-version; MAJOR.MINOR encodes the data format version
+                    if len(parts) > 2 and parts[2].startswith("2."):
+                        return True
         return False
 
     def parse(self):
         start_time = time.time()
-        print("AIRDOS04C parser start")
+        print("AIRDOS v2 parser start")
         metadata = {
             "log_runs_count": 0,
             "log_device_info": {},
             "log_info": {},
         }
-        hist = np.zeros(1024, dtype=int)
+        hist = np.zeros(65536, dtype=int)
         total_counts = 0
         sums: List[int] = []
         time_axis: List[float] = []
         inside_run = False
         current_hist = None
         current_counts = 0
+        device_type = "unknown"
 
         with open(self.file_path, "r") as file:
             for line in file:
                 parts = line.strip().split(",")
                 match parts[0]:
                     case "$DOS":
+                        device_type = parts[1] if len(parts) > 1 else "unknown"
                         metadata["log_device_info"]["DOS"] = {
                             "type": parts[0],
                             "hw-model": parts[1],
@@ -102,10 +107,14 @@ class Airdos04CLogParser(BaseLogParser):
         metadata["log_info"]["events_total"] = int(total_counts)
         metadata["log_info"]["log_type_version"] = "2.0"
         metadata["log_info"]["log_type"] = "xDOS_SPECTRAL"
-        metadata["log_info"]["detector_type"] = "AIRDOS04C"
-        print("Parsed AIRDOS04C format in", time.time() - start_time, "s")
+        metadata["log_info"]["detector_type"] = device_type
+        print("Parsed AIRDOS v2 format in", time.time() - start_time, "s")
 
         return [np.array(time_axis), np.array(sums), hist, metadata]
+
+
+# Backwards-compatible alias
+Airdos04CLogParser = AirdosV2LogParser
 
 
 class OldLogParser(BaseLogParser):
@@ -203,7 +212,7 @@ class OldLogParser(BaseLogParser):
         return [time_column, sums, hist, metadata]
 
 
-LOG_PARSERS: Sequence[type[BaseLogParser]] = [Airdos04CLogParser, OldLogParser]
+LOG_PARSERS: Sequence[type[BaseLogParser]] = [AirdosV2LogParser, OldLogParser]
 
 
 def get_parser_for_file(file_path: str | Path) -> BaseLogParser:
@@ -220,7 +229,8 @@ def parse_file(file_path: str | Path):
 
 __all__ = [
     "BaseLogParser",
-    "Airdos04CLogParser",
+    "AirdosV2LogParser",
+    "Airdos04CLogParser",  # backwards-compatible alias
     "OldLogParser",
     "get_parser_for_file",
     "parse_file",

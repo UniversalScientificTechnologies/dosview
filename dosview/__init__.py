@@ -804,6 +804,11 @@ class PlotTab(QWidget):
         self.upload_file_button.setMaximumHeight(20)
         self.upload_file_button.clicked.connect(lambda: UploadFileDialog().exec_())
 
+        self.export_csv_button = QPushButton("Export spectrum")
+        self.export_csv_button.setMaximumHeight(20)
+        self.export_csv_button.clicked.connect(self.export_spectrum_csv)
+        self.export_csv_button.setEnabled(False)
+
         log_view_widget = QWidget()
 
         self.left_panel = QSplitter(Qt.Vertical)
@@ -814,6 +819,7 @@ class PlotTab(QWidget):
         vb = QHBoxLayout()
         vb.addWidget(self.open_img_view_button)
         vb.addWidget(self.upload_file_button)
+        vb.addWidget(self.export_csv_button)
         self.left_panel.setLayout(vb)
 
         self.logView_splitter = QSplitter(Qt.Horizontal)
@@ -843,8 +849,9 @@ class PlotTab(QWidget):
         self.load_data_thread.start()
 
     def on_data_loaded(self, data):
-        self.data = data # TODO>.. tohle do budoucna zrusit a nahradit tridou parseru.. 
+        self.data = data # TODO>.. tohle do budoucna zrusit a nahradit tridou parseru..
         print("Data are fully loaded...")
+        self.export_csv_button.setEnabled(True)
         self.plot_canvas.plot(data)
         print("After plot data canvas")
         
@@ -888,11 +895,27 @@ class PlotTab(QWidget):
 
 
     def open_spectrogram_view(self):
-        matrix = self.data[-1] #TODO .. tohle predelat na nejakou tridu pro parserovani 
+        matrix = self.data[-1] #TODO .. tohle predelat na nejakou tridu pro parserovani
 
         w = DataSpectrumView(self)
         w.show()
         w.plot_data(matrix)
+
+    def export_spectrum_csv(self):
+        path, _ = QFileDialog.getSaveFileName(
+            self, "Export spectrum", "", "CSV files (*.csv)"
+        )
+        if not path:
+            return
+        if not path.endswith(".csv"):
+            path += ".csv"
+        import csv
+        hist = self.data[2]
+        with open(path, "w", newline="") as f:
+            writer = csv.writer(f)
+            writer.writerow(["channel", "counts"])
+            for ch, cnt in enumerate(hist):
+                writer.writerow([ch, int(cnt)])
 
 
 class UploadFileDialog(QDialog):
