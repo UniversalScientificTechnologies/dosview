@@ -59,6 +59,8 @@ class AirdosV2LogParser(BaseLogParser):
         current_hist = None
         current_counts = 0
         device_type = "unknown"
+        env_records: List[Tuple[float, ...]] = []
+        batt_records: List[Tuple[float, ...]] = []
 
         with open(self.file_path, "r") as file:
             for line in file:
@@ -88,8 +90,8 @@ class AirdosV2LogParser(BaseLogParser):
                                 current_counts += 1
                     case "$STOP":
                         if inside_run:
-                            if len(parts) > 4:
-                                for idx, val in enumerate(parts[4:]):
+                            if len(parts) > 5:
+                                for idx, val in enumerate(parts[5:]):
                                     try:
                                         current_hist[idx] += int(val)
                                     except ValueError:
@@ -100,6 +102,35 @@ class AirdosV2LogParser(BaseLogParser):
                             time_axis.append(float(parts[2]))
                         inside_run = False
                         current_hist = None
+                    case "$ENV":
+                        # $ENV,count,tm.tm_s100,T1,H1,T2,H2,T_MS5611,P_MS5611
+                        if len(parts) >= 9:
+                            try:
+                                env_records.append((
+                                    float(parts[2]),  # time
+                                    float(parts[3]),  # T1 (SHT31 primary)
+                                    float(parts[4]),  # H1
+                                    float(parts[5]),  # T2 (SHT31 secondary)
+                                    float(parts[6]),  # H2
+                                    float(parts[7]),  # T_MS5611
+                                    float(parts[8]),  # P_MS5611
+                                ))
+                            except ValueError:
+                                pass
+                    case "$BATT":
+                        # $BATT,count,tm.tm_s100,voltage_mV,current_mA,remaining_mAh,full_mAh,temp_C
+                        if len(parts) >= 8:
+                            try:
+                                batt_records.append((
+                                    float(parts[2]),  # time
+                                    float(parts[3]),  # voltage_mV
+                                    float(parts[4]),  # current_mA
+                                    float(parts[5]),  # remaining_mAh
+                                    float(parts[6]),  # full_charge_mAh
+                                    float(parts[7]),  # temperature_C
+                                ))
+                            except ValueError:
+                                pass
                     case _:
                         continue
 
@@ -108,9 +139,26 @@ class AirdosV2LogParser(BaseLogParser):
         metadata["log_info"]["log_type_version"] = "2.0"
         metadata["log_info"]["log_type"] = "xDOS_SPECTRAL"
         metadata["log_info"]["detector_type"] = device_type
-        print("Parsed AIRDOS v2 format in", time.time() - start_time, "s")
 
-        return [np.array(time_axis), np.array(sums), hist, metadata]
+        telemetry: dict = {}
+        if env_records:
+            ea = np.array(env_records)
+            telemetry["temperature_0"] = (ea[:, 0], ea[:, 1])
+            telemetry["humidity_0"]    = (ea[:, 0], ea[:, 2])
+            telemetry["temperature_1"] = (ea[:, 0], ea[:, 3])
+            telemetry["humidity_1"]    = (ea[:, 0], ea[:, 4])
+            telemetry["temperature_2"] = (ea[:, 0], ea[:, 5])
+            telemetry["pressure_3"]    = (ea[:, 0], ea[:, 6])
+        if batt_records:
+            ba = np.array(batt_records)
+            telemetry["voltage"]            = (ba[:, 0], ba[:, 1])
+            telemetry["current"]            = (ba[:, 0], ba[:, 2])
+            telemetry["capacity_remaining"] = (ba[:, 0], ba[:, 3])
+            telemetry["capacity_full"]      = (ba[:, 0], ba[:, 4])
+            telemetry["temperature"]        = (ba[:, 0], ba[:, 5])
+
+        print("Parsed AIRDOS v2 format in", time.time() - start_time, "s")
+        return [np.array(time_axis), np.array(sums), hist, metadata, telemetry]
 
 
 # Backwards-compatible alias
