@@ -138,21 +138,22 @@ except Exception as _e:
 
 class AIRDOS04CTRL(QThread):
     """
-    Qt thread pro komunikaci s AIRDOS04 detektorem přes HID/I2C.
-    
-    Hardware operace jsou delegovány na Airdos04Hardware třídu.
-    Tento thread se stará o:
-    - HID připojení/odpojení
-    - Qt signály pro GUI
-    - Thread-safe volání hardware operací
+    Qt thread for communication with the AIRDOS04 detector via HID/I2C.
+
+    Hardware operations are delegated to the Airdos04Hardware class.
+    This thread is responsible for:
+    - HID connect/disconnect
+    - Qt signals for the GUI
+    - Thread-safe hardware calls
     """
     connected = pyqtSignal(bool)
     connect = pyqtSignal(bool)
     sendAirdosStatus = pyqtSignal(dict)
-    sendEepromData = pyqtSignal(dict)  # Signál pro EEPROM data
+    sendEepromData = pyqtSignal(dict)  # Signal carrying EEPROM data
     loadingStateChanged = pyqtSignal(bool, str)  # (is_loading, message)
+    errorOccurred = pyqtSignal(str)  # Signal for error messages
 
-    # USB HID identifikace
+    # USB HID identification
     VID = 0x1209    
     PID = 0x7aa0
 
@@ -189,64 +190,77 @@ class AIRDOS04CTRL(QThread):
                         hid_interface_i2c = hidDevice
                     else:
                         hid_interface_uart = hidDevice
-            
-            self.dev = hid.device()
-            #self.dev.open(self.VID, self.PID)
-            self.dev.open_path(hid_interface_i2c['path'])
 
-            self.dev_uart = hid.device()
-            self.dev_uart.open_path(hid_interface_uart['path'])
-            print("Connected to HID device", self.dev, self.dev_uart)
-
-            self.loadingStateChanged.emit(True, "Initializing device...")
-            
-            self.dev.send_feature_report([0xA1, 0x20])
-            self.dev.send_feature_report([0xA1, 0x02, 0x01])
-
-            # Bind the already-open HID interface to the FT260_I2C driver
-            self.ftdi = FT260HidDriver(hid_device=self.dev)
-
-            # Inicializace Airdos04Hardware - Qt-nezávislé rozhraní pro hardware
-            self.hw = Airdos04Hardware(self.ftdi)
-
-            # Přepnout I2C switch na I2C z USB
-            self.hw.set_i2c_direction(to_usb=True)
-
-            # Povolit nabíjení
-            self.hw.enable_charging()
-
-            self.loadingStateChanged.emit(True, "Reading serial numbers...")
-            
-            # Vyčíst sériová čísla pomocí hw modulu
-            print("AIRDOS SN ... ")
-            try:
-                self.basic_params['sn_batdatunit'] = self.hw.read_serial_number_batdatunit()
-                print(self.basic_params['sn_batdatunit'])
-            except Exception as e:
-                print(f"Error reading BatDatUnit SN: {e}")
-                self.basic_params['sn_batdatunit'] = "N/A"
+            if hid_interface_i2c is None or hid_interface_uart is None:
+                self.loadingStateChanged.emit(False, "")
+                self.errorOccurred.emit("AIRDOS device not found.\nPlease check that the device is connected via USB.")
+                return
 
             try:
-                self.basic_params['sn_ustsipin'] = self.hw.read_serial_number_ustsipin()
-                print(self.basic_params['sn_ustsipin'])
+                self.dev = hid.device()
+                self.dev.open_path(hid_interface_i2c['path'])
+
+                self.dev_uart = hid.device()
+                self.dev_uart.open_path(hid_interface_uart['path'])
+                print("Connected to HID device", self.dev, self.dev_uart)
+
+                self.loadingStateChanged.emit(True, "Initializing device...")
+
+                self.dev.send_feature_report([0xA1, 0x20])
+                self.dev.send_feature_report([0xA1, 0x02, 0x01])
+
+                # Bind the already-open HID interface to the FT260_I2C driver
+                self.ftdi = FT260HidDriver(hid_device=self.dev)
+
+                # Initialise Airdos04Hardware — Qt-independent hardware interface
+                self.hw = Airdos04Hardware(self.ftdi)
+
+                # Switch I2C mux to USB side
+                self.hw.set_i2c_direction(to_usb=True)
+
+                # Enable battery charging
+                self.hw.enable_charging()
+
+                self.loadingStateChanged.emit(True, "Reading serial numbers...")
+
+                # Read serial numbers via the hw module
+                print("AIRDOS SN ... ")
+                try:
+                    self.basic_params['sn_batdatunit'] = self.hw.read_serial_number_batdatunit()
+                    print(self.basic_params['sn_batdatunit'])
+                except Exception as e:
+                    print(f"Error reading BatDatUnit SN: {e}")
+                    self.basic_params['sn_batdatunit'] = "N/A"
+
+                try:
+                    self.basic_params['sn_ustsipin'] = self.hw.read_serial_number_ustsipin()
+                    print(self.basic_params['sn_ustsipin'])
+                except Exception as e:
+                    print(f"Error reading USTSIPIN SN: {e}")
+                    self.basic_params['sn_ustsipin'] = "N/A"
+
+                self.hw.set_i2c_direction(to_usb=False)
+
+                self.connected.emit(True)
+
+                # Automatically load sensor and EEPROM data after connect
+                self.get_all_data()
+
             except Exception as e:
-                print(f"Error reading USTSIPIN SN: {e}")
-                self.basic_params['sn_ustsipin'] = "N/A"
-
-            self.hw.set_i2c_direction(to_usb=False)
-
-
-            self.connected.emit(True)
-            
-            # Automaticky načíst data ze senzorů a EEPROM
-            self.get_all_data()
+                print(f"[I2C] Connection failed: {e}")
+                self.loadingStateChanged.emit(False, "")
+                self.dev = None
+                self.dev_uart = None
+                self.ftdi = None
+                self.hw = None
+                self.errorOccurred.emit(f"Connection failed:\n{e}")
         
         else:
-            # Odpojení
+            # Disconnect
             if self.hw is not None:
                 self.hw.set_i2c_direction(to_usb=True)
-                
-                # Vypnout nabíječku pokud je požadováno
+
+                # Power off charger if requested
                 if power_off:
                     self.hw.disable_charging_and_poweroff()
                 
@@ -265,7 +279,7 @@ class AIRDOS04CTRL(QThread):
 
     @pyqtSlot()
     def get_airdos_status(self):
-        """Vyčte kompletní stav AIRDOS04 a emituje signál s daty."""
+        """Read full AIRDOS04 status and emit signal with the data."""
         if self.hw is None:
             print("[I2C] Not connected; skipping status read")
             return
@@ -273,9 +287,9 @@ class AIRDOS04CTRL(QThread):
         self.hw.set_i2c_direction(to_usb=True)
         
         try:
-            # Použijeme Airdos04Hardware.to_dict() pro kompatibilitu s původním API
+            # Use Airdos04Hardware.to_dict() for compatibility with the original API
             data = self.hw.to_dict()
-            # Přidáme základní parametry (SN načtené při připojení)
+            # Merge basic parameters (serial numbers read at connect time)
             data.update(self.basic_params)
         except Exception as e:
             print(f"[I2C] Error reading status: {e}")
@@ -283,14 +297,14 @@ class AIRDOS04CTRL(QThread):
         finally:
             self.hw.set_i2c_direction(to_usb=False)
         
-        print("Posilam...", type(data))
+        print("Sending...", type(data))
         print(data)
         self.sendAirdosStatus.emit(data)
 
 
     @pyqtSlot()
     def reset_rtc_time(self):
-        """Resetuje RTC stopky na nulu."""
+        """Reset the RTC counter to zero."""
         if self.hw is None:
             print("[I2C] Not connected; skipping RTC reset")
             return
@@ -304,18 +318,18 @@ class AIRDOS04CTRL(QThread):
 
     @pyqtSlot()
     def get_all_data(self):
-        """Načte všechna data - senzory i EEPROM."""
-        self.loadingStateChanged.emit(True, "Načítání senzorů...")
+        """Load all data — sensors and EEPROM."""
+        self.loadingStateChanged.emit(True, "Loading sensors...")
         self.get_airdos_status()
-        
-        self.loadingStateChanged.emit(True, "Načítání EEPROM...")
+
+        self.loadingStateChanged.emit(True, "Loading EEPROM...")
         self.get_eeprom_data()
         
         self.loadingStateChanged.emit(False, "")
 
     @pyqtSlot()
     def get_eeprom_data(self):
-        """Vyčte EEPROM data z detektoru a baterie a emituje signál."""
+        """Read EEPROM data from detector and battery, then emit signal."""
         if self.hw is None:
             print("[I2C] Not connected; skipping EEPROM read")
             return
@@ -326,7 +340,7 @@ class AIRDOS04CTRL(QThread):
         self.hw.set_i2c_direction(to_usb=True)
         
         try:
-            # EEPROM detektor
+            # Detector EEPROM
             try:
                 det_data = self.hw.read_eeprom(TOTAL_SIZE, start_address=0, eeprom_address=self.hw.addr.eeprom)
                 det_record = unpack_record(det_data, verify_crc=False)
@@ -334,8 +348,8 @@ class AIRDOS04CTRL(QThread):
             except Exception as e:
                 print(f"[EEPROM] Error reading detector EEPROM: {e}")
                 eeprom_data['detector'] = {'error': str(e)}
-            
-            # EEPROM baterie
+
+            # Battery EEPROM
             try:
                 bat_data = self.hw.read_eeprom(TOTAL_SIZE, start_address=0, eeprom_address=self.hw.addr.eeprom_bat)
                 bat_record = unpack_record(bat_data, verify_crc=False)
@@ -410,10 +424,11 @@ class AirdosConfigTab(QWidget):
         super().__init__()
 
         self.i2c_thread = AIRDOS04CTRL()
-        self.i2c_thread.connected.connect(self.on_i2c_connected)  
+        self.i2c_thread.connected.connect(self.on_i2c_connected)
         self.i2c_thread.sendAirdosStatus.connect(self.on_airdos_status)
         self.i2c_thread.sendEepromData.connect(self.on_eeprom_data)
         self.i2c_thread.loadingStateChanged.connect(self.on_loading_state)
+        self.i2c_thread.errorOccurred.connect(self.on_i2c_error)
         self.i2c_thread.start()
 
         #self.uart_thread = HIDUARTCommunicationThread().start()
@@ -452,16 +467,20 @@ class AirdosConfigTab(QWidget):
         self._update_tree_with_data(self.i2c_parameters_tree, status)
 
     def on_eeprom_data(self, eeprom_data):
-        """Handler pro EEPROM data."""
+        """Handler for EEPROM data."""
         print("EEPROM DATA:")
         print(eeprom_data)
         
         self._update_tree_with_data(self.eeprom_tree, eeprom_data)
 
+    def on_i2c_error(self, message: str):
+        """Handler for I2C connection errors."""
+        QMessageBox.warning(self, "Connection error", message)
+
     def on_loading_state(self, is_loading: bool, message: str):
-        """Handler pro změnu stavu načítání."""
+        """Handler for loading state changes."""
         if is_loading:
-            # Zobrazit loading dialog
+            # Show loading dialog
             if not hasattr(self, '_loading_dialog') or self._loading_dialog is None:
                 self._loading_dialog = LoadingDialog(self, "Loading", message)
                 self._loading_dialog.start()
@@ -470,13 +489,13 @@ class AirdosConfigTab(QWidget):
                 if not self._loading_dialog.isVisible():
                     self._loading_dialog.start()
         else:
-            # Skrýt loading dialog
+            # Hide loading dialog
             if hasattr(self, '_loading_dialog') and self._loading_dialog is not None:
                 self._loading_dialog.stop()
                 self._loading_dialog = None
 
     def _update_tree_with_data(self, tree: QTreeWidget, data: dict):
-        """Aktualizuje tree widget s daty."""
+        """Populate a tree widget with a nested data dictionary."""
         tree.clear()
 
         def add_properties_to_tree(item, properties):
@@ -546,8 +565,8 @@ class AirdosConfigTab(QWidget):
         i2c_layout_row_1.addWidget(self.i2c_power_off_button)
         i2c_layout.addLayout(i2c_layout_row_1)
 
-        # Senzory tree
-        sensors_label = QLabel("📊 Senzory")
+        # Sensors tree
+        sensors_label = QLabel("📊 Sensors")
         sensors_label.setStyleSheet("font-weight: bold; margin-top: 5px;")
         i2c_layout.addWidget(sensors_label)
         
@@ -564,7 +583,7 @@ class AirdosConfigTab(QWidget):
         self.eeprom_tree.setHeaderLabels(["Parameter", "Value"])
         i2c_layout.addWidget(self.eeprom_tree)
 
-        # Řádek s akčními tlačítky
+        # Action buttons row
         i2c_actions_row = QHBoxLayout()
         
         reload_button = QPushButton("🔄 Reload All")
@@ -577,7 +596,7 @@ class AirdosConfigTab(QWidget):
         
         i2c_layout.addLayout(i2c_actions_row)
 
-        # Řádek s EEPROM manager tlačítky
+        # EEPROM manager buttons row
         i2c_eeprom_row = QHBoxLayout()
         
         eeprom_det_btn = QPushButton("📀 EEPROM (detector)")
@@ -626,7 +645,7 @@ class AirdosConfigTab(QWidget):
             # Graceful fallback: demo mode without device
             def read_device() -> bytes:
                 # Return empty 101-byte block (unprogrammed EEPROM = 0xFF)
-                _log_eeprom("info", "I2C není připojeno; spouštím demo mode")
+                _log_eeprom("info", "I2C not connected; starting demo mode")
                 _log_eeprom("read", "Demo mode: returning synthetic 0xFF block", data=b'\xFF' * 16)
                 return b'\xFF' * 101
             def write_device(blob: bytes) -> None:
@@ -641,14 +660,14 @@ class AirdosConfigTab(QWidget):
                     hw.set_i2c_direction(to_usb=True)
                     _log_eeprom("read", f"Reading 101 bytes from EEPROM addr=0x{read_addr:02X}")
                     
-                    # Debug: vyčíst SN
+                    # Debug: read serial number
                     try:
                         sn = hw.read_serial_number(hw.addr.eeprom_sn)
                         print(f"EEPROM SN: {hex(sn)}")
                     except Exception as e:
                         print(f"Warning: Could not read EEPROM SN: {e}")
                     
-                    # Vyčíst data z EEPROM pomocí Airdos04Hardware
+                    # Read EEPROM data via Airdos04Hardware
                     data = hw.read_eeprom(101, start_address=0, eeprom_address=read_addr)
                     _log_eeprom(
                         "read",
@@ -684,34 +703,33 @@ class AirdosConfigTab(QWidget):
             io_context=self.i2c_thread,
         )
         v.addWidget(w)
-        btn_close = QPushButton("Zavřít")
+        btn_close = QPushButton("Close")
         btn_close.clicked.connect(dlg.accept)
         v.addWidget(btn_close)
         dlg.resize(900, 600)
         dlg.exec_()
 
     def open_eeprom_manager_detector(self):
-        """Otevře EEPROM manager pro analogovou desku (USTSIPIN)."""
+        """Open EEPROM manager for the analogue board (USTSIPIN)."""
         if self.i2c_thread.hw:
             self._open_eeprom_manager(self.i2c_thread.hw.addr.an_eeprom)
         else:
             self._open_eeprom_manager(0x53)  # fallback address
 
     def open_eeprom_manager_battery(self):
-        """Otevře EEPROM manager pro BatDatUnit."""
+        """Open EEPROM manager for the BatDatUnit."""
         if self.i2c_thread.hw:
             self._open_eeprom_manager(self.i2c_thread.hw.addr.eeprom)
         else:
             self._open_eeprom_manager(0x50)  # fallback address
 
     def open_rtc_manager(self):
-        """Otevře RTC manager pro správu hodin detektoru."""
+        """Open the RTC manager for detector clock management."""
         if not self.i2c_thread or not self.i2c_thread.hw:
-            # Demo mode
             QMessageBox.warning(
                 self,
                 "RTC Manager",
-                "I2C není připojeno. Připojte se k detektoru."
+                "I2C is not connected. Please connect to the detector first."
             )
             return
         
@@ -732,7 +750,7 @@ class AirdosConfigTab(QWidget):
                 hw.set_i2c_direction(to_usb=False)
         
         def sync_rtc():
-            # Zapíše kalibrační bod do EEPROM (sync_time, sync_rtc_seconds)
+            # Write calibration point to EEPROM (sync_time, sync_rtc_seconds)
             try:
                 hw.set_i2c_direction(to_usb=True)
                 return hw.sync_rtc()
@@ -751,10 +769,10 @@ class AirdosConfigTab(QWidget):
         w.show_raw_registers(True)
         v.addWidget(w)
         
-        btn_close = QPushButton("Zavřít")
+        btn_close = QPushButton("Close")
         btn_close.clicked.connect(dlg.accept)
         v.addWidget(btn_close)
-        
+
         dlg.resize(550, 550)
         dlg.exec_()
 
