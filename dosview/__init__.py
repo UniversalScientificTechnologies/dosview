@@ -22,6 +22,8 @@ from PyQt5.QtWidgets import *
 import hid
 import numpy as np
 import os
+import serial
+import serial.tools.list_ports
 
 from .version import __version__
 from pyqtgraph import ImageView
@@ -381,11 +383,174 @@ class USBStorageMonitoringThread(QThread):
     def __init__(self):
         QThread.__init__(self)
         # Initialize USB storage monitoring here
-    
+
     def run(self):
         pass
         # Implement USB storage monitoring logic here
 
+
+class UARTReaderThread(QThread):
+    """
+    QThread that reads a live AIRDOS data stream from a serial/UART port.
+
+    Supports both output formats used across AIRDOS devices:
+    - Old format  ($HIST, $AIRDOS, $ENV, …) — AIRDOS03 and older
+    - New v2 format ($DOS, $START, $STOP, $E, $ENV, …) — AIRDOS04C fw 2.x+
+
+    The format is auto-detected from the first recognised message type.
+    After each complete record ($HIST or $STOP) the accumulated data is
+    emitted via dataUpdated so that a LivePlotTab can refresh its graphs.
+    """
+
+    connected     = pyqtSignal(bool)
+    dataUpdated   = pyqtSignal(list)   # [time_axis, sums, hist, metadata]
+    errorOccurred = pyqtSignal(str)
+
+    def __init__(self, port: str, baud: int = 115200):
+        QThread.__init__(self)
+        self._port = port
+        self._baud = baud
+        self._running = False
+        self._ser = None
+
+    def run(self):
+        self._running = True
+        hist = np.zeros(1000, dtype=int)
+        time_axis = []
+        sums = []
+        metadata = {"log_runs_count": 0, "log_device_info": {}}
+        fmt = None  # 'old' or 'v2'
+
+        # v2-specific inter-record state
+        current_hist = None
+        current_counts = 0
+
+        try:
+            self._ser = serial.Serial(self._port, self._baud, timeout=1)
+            self.connected.emit(True)
+
+            while self._running:
+                raw = self._ser.readline()
+                if not raw:
+                    continue
+                line = raw.decode("utf-8", errors="replace").strip()
+                if not line:
+                    continue
+                parts = line.split(",")
+                msg = parts[0]
+
+                # --- Format detection ---
+                if fmt is None:
+                    if msg in ("$HIST", "$AIRDOS"):
+                        fmt = "old"
+                    elif msg in ("$START", "$STOP"):
+                        fmt = "v2"
+                    elif msg == "$DOS" and len(parts) > 2 and parts[2].startswith("2."):
+                        fmt = "v2"
+
+                # --- Old format ---
+                if fmt == "old":
+                    if msg == "$AIRDOS" and len(parts) >= 4:
+                        metadata["log_device_info"]["AIRDOS"] = {
+                            "hw-model": parts[1] if len(parts) > 1 else "",
+                            "detector": parts[2] if len(parts) > 2 else "",
+                            "hw-sn":    parts[3].strip() if len(parts) > 3 else "",
+                        }
+                    elif msg == "$HIST":
+                        try:
+                            t = float(parts[2])
+                            channels = np.array(parts[8:], dtype=float).astype(int)
+                            if len(channels) > len(hist):
+                                hist = np.resize(hist, len(channels))
+                            hist[:len(channels)] += channels
+                            time_axis.append(t)
+                            sums.append(int(channels.sum()))
+                            metadata["log_runs_count"] = len(time_axis)
+                            self.dataUpdated.emit(
+                                [np.array(time_axis), np.array(sums), hist.copy(), metadata]
+                            )
+                        except (ValueError, IndexError):
+                            pass
+
+                # --- V2 format ---
+                elif fmt == "v2":
+                    if msg == "$DOS" and len(parts) > 6:
+                        metadata["log_device_info"]["DOS"] = {
+                            "hw-model":    parts[1],
+                            "fw-version":  parts[2],
+                            "eeprom":      parts[3] if len(parts) > 3 else "",
+                            "fw-commit":   parts[4] if len(parts) > 4 else "",
+                            "hw-sn":       parts[6].strip() if len(parts) > 6 else "",
+                        }
+                        metadata["log_runs_count"] += 1
+                    elif msg == "$START":
+                        current_hist = np.zeros_like(hist)
+                        current_counts = 0
+                    elif msg == "$E" and current_hist is not None and len(parts) >= 3:
+                        try:
+                            ch = int(parts[2])
+                            if 0 <= ch < len(current_hist):
+                                current_hist[ch] += 1
+                                current_counts += 1
+                        except ValueError:
+                            pass
+                    elif msg == "$STOP" and current_hist is not None:
+                        try:
+                            for idx, val in enumerate(parts[5:]):
+                                try:
+                                    current_hist[idx] += int(val)
+                                except (ValueError, IndexError):
+                                    pass
+                            hist += current_hist
+                            t = float(parts[1]) if len(parts) > 1 else float(len(time_axis))
+                            time_axis.append(t)
+                            sums.append(int(current_hist.sum()))
+                            self.dataUpdated.emit(
+                                [np.array(time_axis), np.array(sums), hist.copy(), metadata]
+                            )
+                        except (ValueError, IndexError):
+                            pass
+                        current_hist = np.zeros_like(hist)
+                        current_counts = 0
+
+        except serial.SerialException as e:
+            self.errorOccurred.emit(str(e))
+        finally:
+            if self._ser and self._ser.is_open:
+                self._ser.close()
+            self.connected.emit(False)
+
+    def stop(self):
+        self._running = False
+        if self._ser and self._ser.is_open:
+            self._ser.close()
+
+
+class LivePlotTab(QWidget):
+    """Tab displaying a live AIRDOS data stream as it arrives over UART."""
+
+    def __init__(self, port: str, parent=None):
+        super().__init__(parent)
+        self._port = port
+        self._record_count = 0
+
+        self.status_label = QLabel("Waiting for data…")
+        self.status_label.setAlignment(Qt.AlignCenter)
+
+        self.plot_canvas = PlotCanvas(self)
+
+        layout = QVBoxLayout()
+        layout.addWidget(self.status_label)
+        layout.addWidget(self.plot_canvas)
+        self.setLayout(layout)
+
+    def on_data_updated(self, data):
+        self._record_count += 1
+        self.status_label.setText(f"Live — {self._record_count} record(s) received from {self._port}")
+        self.plot_canvas.plot(data)
+
+    def on_uart_disconnected(self):
+        self.status_label.setText(f"Disconnected — {self._record_count} record(s) captured from {self._port}")
 
 
 class LabdosConfigTab(QWidget):
@@ -420,8 +585,11 @@ class LabdosConfigTab(QWidget):
 
 
 class AirdosConfigTab(QWidget):
+    requestOpenLiveTab = pyqtSignal(object, str)  # (UARTReaderThread, port_name)
+
     def __init__(self):
         super().__init__()
+        self.uart_thread = None
 
         self.i2c_thread = AIRDOS04CTRL()
         self.i2c_thread.connected.connect(self.on_i2c_connected)
@@ -448,11 +616,29 @@ class AirdosConfigTab(QWidget):
         pass
 
     def on_uart_connect(self):
-        pass
+        port = self.uart_port_combo.currentText()
+        if not port:
+            QMessageBox.warning(self, "No port selected", "Please select a serial port first.")
+            return
+        baud = int(self.uart_baud_combo.currentText())
+        self.uart_thread = UARTReaderThread(port, baud)
+        self.uart_thread.errorOccurred.connect(self.on_uart_error)
+        self.uart_thread.connected.connect(self._on_uart_connected_state)
+        self.uart_thread.start()
+        self.requestOpenLiveTab.emit(self.uart_thread, port)
 
     def on_uart_disconnect(self):
+        if self.uart_thread is not None:
+            self.uart_thread.stop()
+            self.uart_thread.wait()
+            self.uart_thread = None
 
-        pass
+    def _on_uart_connected_state(self, connected: bool):
+        self.uart_connect_button.setEnabled(not connected)
+        self.uart_disconnect_button.setEnabled(connected)
+
+    def on_uart_error(self, message: str):
+        QMessageBox.warning(self, "UART error", message)
     
     def on_mass_connect(self):
         pass
@@ -613,10 +799,44 @@ class AirdosConfigTab(QWidget):
         uart_layout.setAlignment(Qt.AlignTop)
         uart_widget.setLayout(uart_layout)
 
-        uart_connect_button = QPushButton("Connect")
-        uart_disconnect_button = QPushButton("Disconnect")
-        uart_layout.addWidget(uart_connect_button)
-        uart_layout.addWidget(uart_disconnect_button)
+        # Port and baud rate selection row
+        uart_port_row = QHBoxLayout()
+        self.uart_port_combo = QComboBox()
+        self.uart_port_combo.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+
+        def refresh_ports():
+            self.uart_port_combo.clear()
+            for port_info in serial.tools.list_ports.comports():
+                self.uart_port_combo.addItem(port_info.device)
+
+        refresh_ports()
+        refresh_btn = QPushButton("↺")
+        refresh_btn.setMaximumWidth(30)
+        refresh_btn.setToolTip("Refresh port list")
+        refresh_btn.clicked.connect(refresh_ports)
+
+        self.uart_baud_combo = QComboBox()
+        self.uart_baud_combo.addItems(["9600", "115200"])
+        self.uart_baud_combo.setCurrentText("115200")
+        self.uart_baud_combo.setMaximumWidth(80)
+
+        uart_port_row.addWidget(QLabel("Port:"))
+        uart_port_row.addWidget(self.uart_port_combo)
+        uart_port_row.addWidget(refresh_btn)
+        uart_port_row.addWidget(QLabel("Baud:"))
+        uart_port_row.addWidget(self.uart_baud_combo)
+        uart_layout.addLayout(uart_port_row)
+
+        # Connect / Disconnect buttons
+        uart_btn_row = QHBoxLayout()
+        self.uart_connect_button = QPushButton("Connect")
+        self.uart_disconnect_button = QPushButton("Disconnect")
+        self.uart_disconnect_button.setEnabled(False)
+        self.uart_connect_button.clicked.connect(self.on_uart_connect)
+        self.uart_disconnect_button.clicked.connect(self.on_uart_disconnect)
+        uart_btn_row.addWidget(self.uart_connect_button)
+        uart_btn_row.addWidget(self.uart_disconnect_button)
+        uart_layout.addLayout(uart_btn_row)
         
         splitter.addWidget(i2c_widget)
         splitter.addWidget(uart_widget)
@@ -1173,8 +1393,19 @@ class App(QMainWindow):
     
     def openAirdosTab(self):
         airdos_tab = AirdosConfigTab()
+        airdos_tab.requestOpenLiveTab.connect(self.open_live_tab)
         self.tab_widget.addTab(airdos_tab, "Airdos control")
         self.tab_widget.setCurrentIndex(self.tab_widget.count() - 1)
+        self.updateStackedWidget()
+
+    def open_live_tab(self, uart_thread, port: str):
+        live_tab = LivePlotTab(port)
+        uart_thread.dataUpdated.connect(live_tab.on_data_updated)
+        uart_thread.connected.connect(
+            lambda state, tab=live_tab: tab.on_uart_disconnected() if not state else None
+        )
+        tab_index = self.tab_widget.addTab(live_tab, f"AIRDOS live [{port}]")
+        self.tab_widget.setCurrentIndex(tab_index)
         self.updateStackedWidget()
     
     def openLabdosTab(self):
