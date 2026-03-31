@@ -526,33 +526,6 @@ class UARTReaderThread(QThread):
             self._ser.close()
 
 
-class LivePlotTab(QWidget):
-    """Tab displaying a live AIRDOS data stream as it arrives over UART."""
-
-    def __init__(self, port: str, parent=None):
-        super().__init__(parent)
-        self._port = port
-        self._record_count = 0
-
-        self.status_label = QLabel("Waiting for data…")
-        self.status_label.setAlignment(Qt.AlignCenter)
-
-        self.plot_canvas = PlotCanvas(self)
-
-        layout = QVBoxLayout()
-        layout.addWidget(self.status_label)
-        layout.addWidget(self.plot_canvas)
-        self.setLayout(layout)
-
-    def on_data_updated(self, data):
-        self._record_count += 1
-        self.status_label.setText(f"Live — {self._record_count} record(s) received from {self._port}")
-        self.plot_canvas.plot(data)
-
-    def on_uart_disconnected(self):
-        self.status_label.setText(f"Disconnected — {self._record_count} record(s) captured from {self._port}")
-
-
 class LabdosConfigTab(QWidget):
     def __init__(self):
         super().__init__()
@@ -1171,6 +1144,35 @@ class PlotTab(QWidget):
             writer.writerow(["channel", "counts"])
             for ch, cnt in enumerate(hist):
                 writer.writerow([ch, int(cnt)])
+
+
+class LivePlotTab(PlotTab):
+    """
+    Live-streaming variant of PlotTab.
+
+    Reuses the full PlotTab UI (graphs, metadata tree, telemetry toggles,
+    export button). Instead of loading a file via LoadDataThread, data is
+    fed incrementally by UARTReaderThread via on_data_updated().
+    """
+
+    def __init__(self, port: str):
+        self._port = port
+        super().__init__()          # calls initUI(), builds all widgets
+        # Set up PlotCanvas without a file path, just like open_file() would
+        # but skipping the LoadDataThread step.
+        self.plot_canvas = PlotCanvas(self)
+        self.logView_splitter.addWidget(self.plot_canvas)
+        self.logView_splitter.setSizes([1, 9])
+        sizes = self.logView_splitter.sizes()
+        sizes[0] = int(sizes[1] * 0.1)
+        self.logView_splitter.setSizes(sizes)
+
+    def on_data_updated(self, data):
+        """Called by UARTReaderThread after each complete record."""
+        self.on_data_loaded(data)
+
+    def on_uart_disconnected(self):
+        pass  # graphs and trees retain the last received data
 
 
 class UploadFileDialog(QDialog):
