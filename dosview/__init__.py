@@ -418,6 +418,7 @@ class UARTReaderThread(QThread):
         hist = np.zeros(1000, dtype=int)
         time_axis = []
         sums = []
+        spectral_records = []
         metadata = {"log_runs_count": 0, "log_device_info": {}}
         fmt = None  # 'old' or 'v2'
 
@@ -465,9 +466,11 @@ class UARTReaderThread(QThread):
                             hist[:len(channels)] += channels
                             time_axis.append(t)
                             sums.append(int(channels.sum()))
+                            spectral_records.append(channels.copy())
                             metadata["log_runs_count"] = len(time_axis)
+                            sm = np.array(spectral_records)
                             self.dataUpdated.emit(
-                                [np.array(time_axis), np.array(sums), hist.copy(), metadata]
+                                [np.array(time_axis), np.array(sums), hist.copy(), metadata, {}, sm]
                             )
                         except (ValueError, IndexError):
                             pass
@@ -501,12 +504,14 @@ class UARTReaderThread(QThread):
                                     current_hist[idx] += int(val)
                                 except (ValueError, IndexError):
                                     pass
+                            spectral_records.append(current_hist.copy())
                             hist += current_hist
                             t = float(parts[1]) if len(parts) > 1 else float(len(time_axis))
                             time_axis.append(t)
                             sums.append(int(current_hist.sum()))
+                            sm = np.array(spectral_records)
                             self.dataUpdated.emit(
-                                [np.array(time_axis), np.array(sums), hist.copy(), metadata]
+                                [np.array(time_axis), np.array(sums), hist.copy(), metadata, {}, sm]
                             )
                         except (ValueError, IndexError):
                             pass
@@ -972,15 +977,16 @@ class AirdosConfigTab(QWidget):
 
 class DataSpectrumView(QWidget):
 
-    def __init__(self,parent):
-        self.parent = parent 
+    def __init__(self, parent, title="Spectrogram"):
+        self.parent = parent
+        self._title = title
         super(DataSpectrumView, self).__init__(parent)
         self.setWindowFlags(self.windowFlags() | Qt.Window)
         self.initUI()
 
     def initUI(self):
 
-        self.setWindowTitle(repr(self.parent))
+        self.setWindowTitle(self._title)
         self.setGeometry(100, 100, 400, 300)
         self.imv = pg.ImageView(view=pg.PlotItem())
         layout = QVBoxLayout()
@@ -1123,11 +1129,24 @@ class PlotTab(QWidget):
 
 
     def open_spectrogram_view(self):
-        matrix = self.data[3]  # metadata dict (spectrogram view)
-
-        w = DataSpectrumView(self)
+        if not hasattr(self, "data") or self.data is None or len(self.data) < 6:
+            QMessageBox.warning(self, "Spectrogram", "No spectral data available.")
+            return
+        spectral_matrix = self.data[5]
+        if spectral_matrix.ndim < 2 or spectral_matrix.shape[0] < 2:
+            QMessageBox.warning(self, "Spectrogram", "Not enough records to display a spectrogram.")
+            return
+        # Reuse existing window instead of stacking multiple copies
+        if hasattr(self, "_spectrogram_window") and self._spectrogram_window is not None:
+            self._spectrogram_window.close()
+        title = getattr(self, "_port", None)
+        if not title:
+            fp = getattr(self, "file_path", None)
+            title = os.path.basename(fp) if fp else "Spectrogram"
+        w = DataSpectrumView(self, title=f"Spectrogram — {title}")
+        self._spectrogram_window = w
         w.show()
-        w.plot_data(matrix)
+        w.plot_data(spectral_matrix)
 
     def export_spectrum_csv(self):
         path, _ = QFileDialog.getSaveFileName(
@@ -1144,6 +1163,30 @@ class PlotTab(QWidget):
             writer.writerow(["channel", "counts"])
             for ch, cnt in enumerate(hist):
                 writer.writerow([ch, int(cnt)])
+
+    def save_as(self):
+        if not hasattr(self, "data") or self.data is None:
+            return
+        path, _ = QFileDialog.getSaveFileName(
+            self, "Save data", "", "NumPy archive (*.npz)"
+        )
+        if not path:
+            return
+        if not path.endswith(".npz"):
+            path += ".npz"
+        import json as _json
+        data = self.data
+        arrays = {
+            "time_axis": data[0],
+            "sums":      data[1],
+            "hist":      data[2],
+            "metadata":  np.array(_json.dumps(data[3])),
+        }
+        if len(data) > 4 and data[4]:
+            for key, (t, v) in data[4].items():
+                arrays[f"telemetry_time_{key}"]  = t
+                arrays[f"telemetry_value_{key}"] = v
+        np.savez_compressed(path, **arrays)
 
 
 class LivePlotTab(PlotTab):
@@ -1416,11 +1459,13 @@ class App(QMainWindow):
         self.tab_widget.setCurrentIndex(self.tab_widget.count() - 1)
         self.updateStackedWidget()
 
-    def openCalibrationTab(self):
+    def openCalibrationTab(self, preload_path=None):
         calibration_tab = CalibrationTab()
         self.tab_widget.addTab(calibration_tab, "Calibration")
         self.tab_widget.setCurrentIndex(self.tab_widget.count() - 1)
         self.updateStackedWidget()
+        if preload_path:
+            calibration_tab.load_project(path=preload_path)
 
     def blank_page(self):
         # This is widget for blank page
@@ -1452,9 +1497,15 @@ class App(QMainWindow):
         open = QAction("Open",self)
         open.setShortcut("Ctrl+O")
         open.triggered.connect(self.open_new_file)
-        
         file.addAction(open)
 
+        self.save_as_action = QAction("Save As", self)
+        self.save_as_action.setShortcut("Ctrl+S")
+        self.save_as_action.triggered.connect(self.save_current_tab)
+        self.save_as_action.setEnabled(False)
+        file.addAction(self.save_as_action)
+
+        self.tab_widget.currentChanged.connect(self._update_save_action)
 
         tools = bar.addMenu("&Tools")
 
@@ -1550,18 +1601,28 @@ class App(QMainWindow):
         dlg.exec_()
 
 
+    def _update_save_action(self):
+        widget = self.tab_widget.currentWidget()
+        self.save_as_action.setEnabled(isinstance(widget, (PlotTab, CalibrationTab)))
+
+    def save_current_tab(self):
+        widget = self.tab_widget.currentWidget()
+        if isinstance(widget, CalibrationTab):
+            widget.save_project()
+        elif isinstance(widget, PlotTab):
+            widget.save_as()
+
     def open_new_file(self, flag):
-        print("Open new file")
-
-        dlg = QFileDialog(self, "Projects" )
-        dlg.setFileMode(QFileDialog.ExistingFile)
-
-        fn = dlg.getOpenFileName()
-        print("Open file", fn[0])
-        if fn[0]:
-            self.openPlotTab(fn[0])
-
-        dlg.deleteLater()
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Open file", "",
+            "All supported files (*.dosview_calib *.TXT *.txt);;Calibration (*.dosview_calib);;Log files (*.TXT *.txt);;All files (*)"
+        )
+        if not path:
+            return
+        if path.endswith(".dosview_calib"):
+            self.openCalibrationTab(preload_path=path)
+        else:
+            self.openPlotTab(path)
     
     def closeEvent(self, event):
         print("Closing dosview...")

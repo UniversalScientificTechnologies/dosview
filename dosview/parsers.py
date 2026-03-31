@@ -55,6 +55,7 @@ class AirdosV2LogParser(BaseLogParser):
         total_counts = 0
         sums: List[int] = []
         time_axis: List[float] = []
+        spectral_records: List[np.ndarray] = []
         inside_run = False
         current_hist = None
         current_counts = 0
@@ -96,6 +97,7 @@ class AirdosV2LogParser(BaseLogParser):
                                         current_hist[idx] += int(val)
                                     except ValueError:
                                         continue
+                            spectral_records.append(current_hist.copy())
                             hist += current_hist
                             total_counts += current_counts
                             sums.append(current_counts)
@@ -157,8 +159,9 @@ class AirdosV2LogParser(BaseLogParser):
             telemetry["capacity_full"]      = (ba[:, 0], ba[:, 4])
             telemetry["temperature"]        = (ba[:, 0], ba[:, 5])
 
+        spectral_matrix = np.array(spectral_records) if spectral_records else np.zeros((0, hist.shape[0]), dtype=int)
         print("Parsed AIRDOS v2 format in", time.time() - start_time, "s")
-        return [np.array(time_axis), np.array(sums), hist, metadata, telemetry]
+        return [np.array(time_axis), np.array(sums), hist, metadata, telemetry, spectral_matrix]
 
 
 # Backwards-compatible alias
@@ -257,7 +260,7 @@ class OldLogParser(BaseLogParser):
             }
         )
         print("Parsed OLD format in", time.time() - start_time, "s")
-        return [time_column, sums, hist, metadata]
+        return [time_column, sums, hist, metadata, {}, np_spectrum]
 
 
 LOG_PARSERS: Sequence[type[BaseLogParser]] = [AirdosV2LogParser, OldLogParser]
