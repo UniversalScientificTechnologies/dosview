@@ -80,16 +80,15 @@ class PlotCanvas(pg.GraphicsLayoutWidget):
         plot_evolution.setLabel("bottom","Time", units="min")
 
         time_axis = self.data[0]/60
-        plot_evolution.plot(time_axis, self.data[1],
+        self._curve_evolution = plot_evolution.plot(time_axis, self.data[1],
                         symbol ='o', symbolPen ='pink', name ='Channel', pen=None)
-        
 
         pen = pg.mkPen(color="r", width=3)
         rolling_avg = np.convolve(self.data[1], np.ones(window_size)/window_size, mode='valid')
-        plot_evolution.plot(time_axis[window_size-1:], rolling_avg, pen=pen)
+        self._curve_rolling_avg = plot_evolution.plot(time_axis[window_size-1:], rolling_avg, pen=pen)
 
         ev_data = self.data[2]
-        plot_spectrum.plot(range(len(ev_data)), ev_data,
+        self._curve_spectrum = plot_spectrum.plot(range(len(ev_data)), ev_data,
                         pen="r", symbol='x', symbolPen = 'g',
                         symbolBrush = 0.2, name = "Energy")
         plot_spectrum.setLabel("left", "Total count per channel", units="#")
@@ -98,32 +97,70 @@ class PlotCanvas(pg.GraphicsLayoutWidget):
         plot_spectrum.setLogMode(x=True, y=True)
         plot_spectrum.showGrid(x=True, y=True)
 
+        self._has_telemetry_plot = False
         if len(self.data) > 4 and self.data[4]:
-            telemetry = self.data[4]
-            plot_telemetry = self.addPlot(row=2, col=0)
-            plot_telemetry.showGrid(x=True, y=True)
-            plot_telemetry.setLabel("bottom", "Time", units="min")
-            plot_telemetry.addLegend()
-
-            colors = {
-                "temperature_0": (220, 50, 50),
-                "humidity_0":    (50, 100, 220),
-                "temperature_1": (220, 130, 50),
-                "humidity_1":    (50, 180, 220),
-                "temperature_2": (180, 50, 180),
-                "pressure_3":    (50, 200, 100),
-                "voltage":       (240, 240, 50),
-                "current":       (200, 50, 200),
-                "capacity_remaining": (100, 220, 150),
-                "capacity_full":      (150, 150, 150),
-                "temperature":   (220, 100, 100),
-            }
-            for key, (t, vals) in telemetry.items():
-                pen = pg.mkPen(color=colors.get(key, (200, 200, 200)), width=2)
-                line = plot_telemetry.plot(t / 60, vals, pen=pen, name=key)
-                self.telemetry_lines[key] = line
+            self._add_telemetry_plot(self.data[4])
 
         print("PLOT DURATION ... ", time.time()-start_time)
+
+    _telemetry_colors = {
+        "temperature_0": (220, 50, 50),
+        "humidity_0":    (50, 100, 220),
+        "temperature_1": (220, 130, 50),
+        "humidity_1":    (50, 180, 220),
+        "temperature_2": (180, 50, 180),
+        "pressure_3":    (50, 200, 100),
+        "voltage":       (240, 240, 50),
+        "current":       (200, 50, 200),
+        "capacity_remaining": (100, 220, 150),
+        "capacity_full":      (150, 150, 150),
+        "temperature":   (220, 100, 100),
+    }
+
+    def _add_telemetry_plot(self, telemetry):
+        plot_telemetry = self.addPlot(row=2, col=0)
+        plot_telemetry.showGrid(x=True, y=True)
+        plot_telemetry.setLabel("bottom", "Time", units="min")
+        plot_telemetry.addLegend()
+        for key, (t, vals) in telemetry.items():
+            pen = pg.mkPen(color=self._telemetry_colors.get(key, (200, 200, 200)), width=2)
+            line = plot_telemetry.plot(t / 60, vals, pen=pen, name=key)
+            self.telemetry_lines[key] = line
+        self._has_telemetry_plot = True
+
+    def update_data(self, data):
+        """Update plot curves in-place without clearing (preserves zoom/pan state).
+
+        Falls back to a full plot() call if telemetry appears for the first time.
+        """
+        if not hasattr(self, "_curve_spectrum"):
+            self.plot(data)
+            return
+
+        # If telemetry just arrived and we don't have a telemetry plot yet, do a
+        # full redraw so the third subplot is added.
+        has_telemetry = len(data) > 4 and data[4]
+        if has_telemetry and not self._has_telemetry_plot:
+            self.plot(data)
+            return
+
+        self.data = data
+        window_size = 20
+        time_axis = data[0] / 60
+        sums = data[1]
+
+        self._curve_evolution.setData(time_axis, sums)
+        rolling_avg = np.convolve(sums, np.ones(window_size) / window_size, mode='valid')
+        if len(rolling_avg) > 0:
+            self._curve_rolling_avg.setData(time_axis[window_size - 1:], rolling_avg)
+
+        ev_data = data[2]
+        self._curve_spectrum.setData(range(len(ev_data)), ev_data)
+
+        if has_telemetry:
+            for key, (t, vals) in data[4].items():
+                if self.telemetry_lines.get(key) is not None:
+                    self.telemetry_lines[key].setData(t / 60, vals)
 
     def telemetry_toggle(self, key, value):
         if self.telemetry_lines[key] is not None:
@@ -415,7 +452,7 @@ class UARTReaderThread(QThread):
 
     def run(self):
         self._running = True
-        hist = np.zeros(1000, dtype=int)
+        hist = np.zeros(65536, dtype=int)
         time_axis = []
         sums = []
         spectral_records = []
@@ -506,7 +543,12 @@ class UARTReaderThread(QThread):
                                     pass
                             spectral_records.append(current_hist.copy())
                             hist += current_hist
-                            t = float(parts[1]) if len(parts) > 1 else float(len(time_axis))
+                            try:
+                                t = float(parts[2])
+                            except (ValueError, IndexError):
+                                t = 0.0
+                            if t == 0.0:
+                                t = float(parts[1]) if len(parts) > 1 else float(len(time_axis))
                             time_axis.append(t)
                             sums.append(int(current_hist.sum()))
                             sm = np.array(spectral_records)
@@ -518,8 +560,11 @@ class UARTReaderThread(QThread):
                         current_hist = np.zeros_like(hist)
                         current_counts = 0
 
-        except serial.SerialException as e:
-            self.errorOccurred.emit(str(e))
+        except (serial.SerialException, TypeError):
+            # TypeError happens when stop() closes the port while readline() is
+            # in progress (fd becomes None); treat it as a normal disconnect.
+            if self._running:
+                self.errorOccurred.emit("Serial port closed unexpectedly.")
         finally:
             if self._ser and self._ser.is_open:
                 self._ser.close()
@@ -1186,6 +1231,8 @@ class PlotTab(QWidget):
             for key, (t, v) in data[4].items():
                 arrays[f"telemetry_time_{key}"]  = t
                 arrays[f"telemetry_value_{key}"] = v
+        if len(data) > 5 and data[5] is not None and hasattr(data[5], "shape") and data[5].ndim == 2:
+            arrays["spectral_matrix"] = data[5]
         np.savez_compressed(path, **arrays)
 
 
@@ -1212,7 +1259,12 @@ class LivePlotTab(PlotTab):
 
     def on_data_updated(self, data):
         """Called by UARTReaderThread after each complete record."""
-        self.on_data_loaded(data)
+        if not getattr(self, "_live_initialized", False):
+            self.on_data_loaded(data)   # full setup: plots + metadata tree + telemetry checkboxes
+            self._live_initialized = True
+        else:
+            self.data = data
+            self.plot_canvas.update_data(data)
 
     def on_uart_disconnected(self):
         pass  # graphs and trees retain the last received data
@@ -1418,6 +1470,10 @@ class App(QMainWindow):
         widget = self.tab_widget.widget(index)
         if widget is None:
             return
+        # Close pyqtgraph canvas before removing from the widget tree to avoid
+        # use-after-free crashes in the Qt scene (ViewBox holds a live C++ ref).
+        if hasattr(widget, "plot_canvas") and widget.plot_canvas is not None:
+            widget.plot_canvas.close()
         self.tab_widget.removeTab(index)
         widget.deleteLater()
         self.updateStackedWidget()
@@ -1615,7 +1671,7 @@ class App(QMainWindow):
     def open_new_file(self, flag):
         path, _ = QFileDialog.getOpenFileName(
             self, "Open file", "",
-            "All supported files (*.dosview_calib *.TXT *.txt);;Calibration (*.dosview_calib);;Log files (*.TXT *.txt);;All files (*)"
+            "All supported files (*.dosview_calib *.TXT *.txt *.npz);;Calibration (*.dosview_calib);;Log files (*.TXT *.txt);;Saved data (*.npz);;All files (*)"
         )
         if not path:
             return

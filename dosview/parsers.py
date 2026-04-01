@@ -263,7 +263,33 @@ class OldLogParser(BaseLogParser):
         return [time_column, sums, hist, metadata, {}, np_spectrum]
 
 
-LOG_PARSERS: Sequence[type[BaseLogParser]] = [AirdosV2LogParser, OldLogParser]
+class NpzLogParser(BaseLogParser):
+    """Parser for dosview NPZ archives produced by PlotTab.save_as()."""
+
+    @staticmethod
+    def detect(file_path: str | Path) -> bool:
+        return str(file_path).endswith(".npz")
+
+    def parse(self):
+        import json as _json
+        npz = np.load(self.file_path, allow_pickle=False)
+        time_axis = npz["time_axis"]
+        sums = npz["sums"]
+        hist = npz["hist"]
+        metadata = _json.loads(str(npz["metadata"]))
+        telemetry: dict = {}
+        for key in npz.files:
+            if key.startswith("telemetry_time_"):
+                name = key[len("telemetry_time_"):]
+                telemetry[name] = (npz[f"telemetry_time_{name}"], npz[f"telemetry_value_{name}"])
+        if "spectral_matrix" in npz.files:
+            spectral_matrix = npz["spectral_matrix"]
+        else:
+            spectral_matrix = np.zeros((0, hist.shape[0]), dtype=int)
+        return [time_axis, sums, hist, metadata, telemetry, spectral_matrix]
+
+
+LOG_PARSERS: Sequence[type[BaseLogParser]] = [NpzLogParser, AirdosV2LogParser, OldLogParser]
 
 
 def get_parser_for_file(file_path: str | Path) -> BaseLogParser:
@@ -283,6 +309,7 @@ __all__ = [
     "AirdosV2LogParser",
     "Airdos04CLogParser",  # backwards-compatible alias
     "OldLogParser",
+    "NpzLogParser",
     "get_parser_for_file",
     "parse_file",
 ]
