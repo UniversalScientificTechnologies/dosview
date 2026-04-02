@@ -1,10 +1,9 @@
 # Dosview
 
 ## Overview
-**Dosview** is a lightweight, efficient log viewer written in Python3, utilizing the Qt framework for its graphical interface. It is designed to facilitate quick viewing and analysis of log files directly from the command line.
+**Dosview** is a lightweight, efficient log viewer written in Python3, utilizing the Qt framework for its graphical interface. It is designed to facilitate quick viewing and analysis of [UST's radiation detectors](https://docs.dos.ust.cz/) log files directly from the command line.
 
-![obrazek](doc/img/screenshot.png)
-
+![Dosview showing radiation spectra and time evolution](doc/img/screenshot.png)
 
 
 ## Features
