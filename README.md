@@ -35,7 +35,7 @@ Dosview can be installed using several methods. Below are the instructions for e
 ```
   git clone git://github.com:UniversalScientificTechnologies/dosview.git
   cd dosview
-  sudo pip3 install . 
+  sudo pip3 install -e . 
 ```
 
 ### From setup.py
