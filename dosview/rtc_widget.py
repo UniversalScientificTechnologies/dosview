@@ -327,7 +327,7 @@ class RTCManagerWidget(QtWidgets.QWidget):
                 self._on_reset()
     
     def _on_reset(self) -> None:
-        """Provede reset RTC."""
+        """Provede reset RTC a následně automaticky aplikuje SYNC."""
         if not self._reset_rtc:
             self._set_status("❌ Není připojena funkce resetu")
             return
@@ -335,11 +335,24 @@ class RTCManagerWidget(QtWidgets.QWidget):
         try:
             self._last_reset_time = self._reset_rtc()
             self._last_sync_time = self._last_reset_time  # Reset je také sync
-            self._set_status("✅ RTC resetováno na nulu")
             self.rtc_reset.emit()
-            self._on_update()
         except Exception as e:
             self._set_status(f"❌ Chyba resetu: {e}")
+            return
+        
+        # Po resetu automaticky aplikovat SYNC, aby se do EEPROM zapsal
+        # kalibrační bod (sync_time, sync_rtc_seconds).
+        if self._sync_rtc:
+            try:
+                self._last_sync_time = self._sync_rtc()
+                self._set_status("✅ RTC resetováno a synchronizováno")
+                self.rtc_synced.emit()
+            except Exception as e:
+                self._set_status(f"⚠️ RTC resetováno, sync selhal: {e}")
+        else:
+            self._set_status("✅ RTC resetováno na nulu")
+        
+        self._on_update()
     
     def _set_status(self, msg: str) -> None:
         """Nastaví status zprávu."""

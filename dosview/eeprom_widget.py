@@ -8,7 +8,9 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any, Callable, Optional
 
-from PyQt5 import QtCore, QtWidgets
+import struct
+
+from PyQt5 import QtCore, QtGui, QtWidgets
 
 from .eeprom_schema import (
     DeviceType,
@@ -23,6 +25,7 @@ from .loading_dialog import LoadingContext
 
 IntReader = Callable[[], bytes]
 IntWriter = Callable[[bytes], None]
+SNReader = Callable[[], int]
 
 
 class EepromManagerWidget(QtWidgets.QWidget):
@@ -31,12 +34,18 @@ class EepromManagerWidget(QtWidgets.QWidget):
         parent: Optional[QtWidgets.QWidget] = None,
         read_device: Optional[IntReader] = None,
         write_device: Optional[IntWriter] = None,
+        read_sn: Optional[SNReader] = None,
         io_context: Optional[Any] = None,
+        module_type: str = "detector",
     ) -> None:
         super().__init__(parent)
         self._read_device = read_device
         self._write_device = write_device
+        self._read_sn = read_sn
         self._io_context = io_context
+        # Typ modulu ("detector" nebo "battery") - ovlivňuje, zda se zobrazí
+        # sekce keV kalibrace (pouze detektor má kalibrační koeficienty).
+        self._module_type = module_type
         self._widgets = {}
         self._build_ui()
 
@@ -97,6 +106,14 @@ class EepromManagerWidget(QtWidgets.QWidget):
         self._widgets["device_id"] = self._make_line_edit(max_length=10)
         form_layout.addRow("Device ID (max 10 chars):", self._widgets["device_id"])
 
+        # Serial number (vyčtené z EEPROM SN, read-only)
+        self._widgets["serial_number"] = self._make_line_edit(readonly=True)
+        self._widgets["serial_number"].setPlaceholderText("—")
+        sn_font = self._widgets["serial_number"].font()
+        sn_font.setFamily("monospace")
+        self._widgets["serial_number"].setFont(sn_font)
+        form_layout.addRow("Serial number (SN):", self._widgets["serial_number"])
+
         # === Configuration ===
         form_layout.addRow(self._make_section_label("Configuration"))
         
@@ -107,52 +124,111 @@ class EepromManagerWidget(QtWidgets.QWidget):
         form_layout.addRow("RTC flags (bin):", self._widgets["rtc_flags"])
 
         # === RTC synchronization ===
-        form_layout.addRow(self._make_section_label("RTC Synchronization"))
-        
-        rtc_info = QtWidgets.QLabel("Timestamps for RTC clock synchronization")
-        rtc_info.setStyleSheet("color: gray; font-size: 10px;")
-        form_layout.addRow("", rtc_info)
-        
-        # Init time (kdy RTC bylo na 0)
-        self._widgets["init_time"] = self._make_line_edit()
-        self._widgets["init_time"].setPlaceholderText("Unix timestamp (s)")
-        form_layout.addRow("Init time:", self._widgets["init_time"])
-        
-        self._widgets["init_time_label"] = QtWidgets.QLabel("")
-        self._widgets["init_time_label"].setStyleSheet("color: #666; font-style: italic;")
-        form_layout.addRow("", self._widgets["init_time_label"])
-        
-        # Sync time (čas poslední synchronizace)
-        self._widgets["sync_time"] = self._make_line_edit()
-        self._widgets["sync_time"].setPlaceholderText("Unix timestamp (s)")
-        form_layout.addRow("Sync time:", self._widgets["sync_time"])
-        
-        self._widgets["sync_time_label"] = QtWidgets.QLabel("")
-        self._widgets["sync_time_label"].setStyleSheet("color: #666; font-style: italic;")
-        form_layout.addRow("", self._widgets["sync_time_label"])
-        
-        # Sync RTC seconds (RTC value at synchronization)
-        self._widgets["sync_rtc_seconds"] = self._make_line_edit()
-        self._widgets["sync_rtc_seconds"].setPlaceholderText("RTC seconds at sync")
-        form_layout.addRow("Sync RTC seconds:", self._widgets["sync_rtc_seconds"])
+        # RTC sync konstanty se zobrazují pouze u battery modulu (BatDatUnit
+        # obsahuje RTC čip). Detector (USTSIPIN) nemá RTC parametry.
+        if self._module_type == "battery":
+            form_layout.addRow(self._make_section_label("RTC Synchronization"))
+            
+            rtc_info = QtWidgets.QLabel("Timestamps for RTC clock synchronization")
+            rtc_info.setStyleSheet("color: gray; font-size: 10px;")
+            form_layout.addRow("", rtc_info)
+            
+            rtc_note = QtWidgets.QLabel(
+                "ℹ️ Usually managed via RTC Manager. Saved to file but skipped when loading from file."
+            )
+            rtc_note.setStyleSheet("color: #b36b00; font-size: 10px; font-style: italic;")
+            rtc_note.setWordWrap(True)
+            form_layout.addRow("", rtc_note)
+            
+            # Init time (kdy RTC bylo na 0)
+            self._widgets["init_time"] = self._make_line_edit()
+            self._widgets["init_time"].setPlaceholderText("Unix timestamp (s)")
+            form_layout.addRow("Init time:", self._widgets["init_time"])
+            
+            self._widgets["init_time_label"] = QtWidgets.QLabel("")
+            self._widgets["init_time_label"].setStyleSheet("color: #666; font-style: italic;")
+            form_layout.addRow("", self._widgets["init_time_label"])
+            
+            # Sync time (čas poslední synchronizace)
+            self._widgets["sync_time"] = self._make_line_edit()
+            self._widgets["sync_time"].setPlaceholderText("Unix timestamp (s)")
+            form_layout.addRow("Sync time:", self._widgets["sync_time"])
+            
+            self._widgets["sync_time_label"] = QtWidgets.QLabel("")
+            self._widgets["sync_time_label"].setStyleSheet("color: #666; font-style: italic;")
+            form_layout.addRow("", self._widgets["sync_time_label"])
+            
+            # Sync RTC seconds (RTC value at synchronization)
+            self._widgets["sync_rtc_seconds"] = self._make_line_edit()
+            self._widgets["sync_rtc_seconds"].setPlaceholderText("RTC seconds at sync")
+            form_layout.addRow("Sync RTC seconds:", self._widgets["sync_rtc_seconds"])
+        else:
+            # Detector nemá RTC parametry - vytvoříme skrytá pole pro zachování
+            # API kompatibility (populate/collect). Hodnoty se začtou z EEPROM
+            # a zapíšou zpět beze změny.
+            self._widgets["init_time"] = self._make_line_edit()
+            self._widgets["init_time"].setVisible(False)
+            self._widgets["init_time_label"] = QtWidgets.QLabel("")
+            self._widgets["init_time_label"].setVisible(False)
+            self._widgets["sync_time"] = self._make_line_edit()
+            self._widgets["sync_time"].setVisible(False)
+            self._widgets["sync_time_label"] = QtWidgets.QLabel("")
+            self._widgets["sync_time_label"].setVisible(False)
+            self._widgets["sync_rtc_seconds"] = self._make_line_edit()
+            self._widgets["sync_rtc_seconds"].setVisible(False)
 
         # === keV calibration ===
-        form_layout.addRow(self._make_section_label("keV Calibration"))
-        
-        calib_info = QtWidgets.QLabel("Polynomial coefficients: keV = a₀ + a₁·ch + a₂·ch²")
-        calib_info.setStyleSheet("color: gray; font-size: 10px;")
-        form_layout.addRow("", calib_info)
-        
+        # Kalibrační koeficienty se zobrazují pouze u detektoru (ne u battery
+        # modulu). Hodnoty lze zadat ručně.
         self._widgets["calib"] = []
-        calib_labels = ["a₀ (offset) [keV]:", "a₁ (linear) [keV/ch]:", "a₂ (quadratic) [keV/ch²]:"]
-        for i, label in enumerate(calib_labels):
-            field = self._make_double_field()
-            self._widgets["calib"].append(field)
-            form_layout.addRow(label, field)
+        if self._module_type == "detector":
+            form_layout.addRow(self._make_section_label("keV Calibration"))
+            
+            calib_info = QtWidgets.QLabel("Polynomial coefficients: keV = a₀ + a₁·ch + a₂·ch²")
+            calib_info.setStyleSheet("color: gray; font-size: 10px;")
+            form_layout.addRow("", calib_info)
+            
+            calib_note = QtWidgets.QLabel(
+                "ℹ️ Stored as float32 (single precision, ~7 significant digits). "
+                "Scientific notation is supported (e.g. 1.5e-5)."
+            )
+            calib_note.setStyleSheet("color: #666; font-size: 10px; font-style: italic;")
+            calib_note.setWordWrap(True)
+            form_layout.addRow("", calib_note)
+            
+            calib_labels = ["a₀ (offset) [keV]:", "a₁ (linear) [keV/ch]:", "a₂ (quadratic) [keV/ch²]:"]
+            for i, label in enumerate(calib_labels):
+                field = self._make_float_field()
+                self._widgets["calib"].append(field)
+                form_layout.addRow(label, field)
 
-        self._widgets["calib_ts"] = self._make_line_edit()
-        self._widgets["calib_ts"].setPlaceholderText("Unix timestamp")
-        form_layout.addRow("Calibration timestamp:", self._widgets["calib_ts"])
+            # Řádek s calib_ts + tlačítkem "Now" pro vložení aktuálního
+            # Unix timestampu.
+            calib_ts_row = QtWidgets.QHBoxLayout()
+            self._widgets["calib_ts"] = self._make_line_edit()
+            self._widgets["calib_ts"].setPlaceholderText("Unix timestamp")
+            self.btn_calib_ts_now = QtWidgets.QPushButton("⏱️ Now")
+            self.btn_calib_ts_now.setToolTip("Set current Unix timestamp")
+            self.btn_calib_ts_now.clicked.connect(self._on_calib_ts_now)
+            calib_ts_row.addWidget(self._widgets["calib_ts"])
+            calib_ts_row.addWidget(self.btn_calib_ts_now)
+            form_layout.addRow("Calibration timestamp:", calib_ts_row)
+            
+            self._widgets["calib_ts_label"] = QtWidgets.QLabel("")
+            self._widgets["calib_ts_label"].setStyleSheet("color: #666; font-style: italic;")
+            form_layout.addRow("", self._widgets["calib_ts_label"])
+        else:
+            # Battery modul nemá kalibraci - vytvoříme skrytá pole, aby zůstala
+            # API kompatibilita (populate/collect) a hodnoty se zachovaly
+            # při čtení/zápisu z/do zařízení.
+            for _ in range(3):
+                field = self._make_float_field()
+                field.setVisible(False)
+                self._widgets["calib"].append(field)
+            self._widgets["calib_ts"] = self._make_line_edit()
+            self._widgets["calib_ts"].setVisible(False)
+            self._widgets["calib_ts_label"] = QtWidgets.QLabel("")
+            self._widgets["calib_ts_label"].setVisible(False)
 
         layout.addWidget(scroll)
 
@@ -188,12 +264,31 @@ class EepromManagerWidget(QtWidgets.QWidget):
         sb.setButtonSymbols(QtWidgets.QAbstractSpinBox.NoButtons)
         return sb
 
-    def _make_double_field(self) -> QtWidgets.QDoubleSpinBox:
+    def _make_double_field(self, readonly: bool = False) -> QtWidgets.QDoubleSpinBox:
         dsb = QtWidgets.QDoubleSpinBox()
         dsb.setRange(-1e9, 1e9)
         dsb.setDecimals(6)
         dsb.setButtonSymbols(QtWidgets.QAbstractSpinBox.NoButtons)
+        if readonly:
+            dsb.setReadOnly(True)
         return dsb
+
+    def _make_float_field(self) -> QtWidgets.QLineEdit:
+        """Pole pro float32 hodnotu s podporou vědecké notace.
+
+        Kalibrační koeficienty jsou v EEPROM uložené jako float32 (IEEE 754
+        single precision, ~7 významných číslic). Textové pole umožňuje zadat
+        hodnoty jako 0.00001 i 1.5e-5.
+        """
+        le = QtWidgets.QLineEdit()
+        le.setPlaceholderText("0.0  (e.g. 1.5e-5)")
+        validator = QtGui.QDoubleValidator()
+        validator.setNotation(QtGui.QDoubleValidator.ScientificNotation)
+        le.setValidator(validator)
+        font = le.font()
+        font.setFamily("monospace")
+        le.setFont(font)
+        return le
 
     def _make_binary_field(self, bits: int = 32) -> QtWidgets.QLineEdit:
         """Pole pro binární hodnotu."""
@@ -222,8 +317,22 @@ class EepromManagerWidget(QtWidgets.QWidget):
         except (OSError, ValueError):
             return "Neplatný čas"
 
+    @staticmethod
+    def _to_float32(value: float) -> float:
+        """Zaokrouhlí hodnotu na nejbližší float32 (IEEE 754 single)."""
+        return struct.unpack("<f", struct.pack("<f", float(value)))[0]
+
+    @classmethod
+    def _format_float32(cls, value: float) -> str:
+        """Formátuje float jako řetězec s přesností float32 (7 značných číslic)."""
+        f32 = cls._to_float32(value)
+        if f32 == 0.0:
+            return "0"
+        # 7 významných číslic pokrývá přesnost float32; %g odstraní trailing nuly.
+        return f"{f32:.7g}"
+
     # Data population -----------------------------------------------------
-    def _populate(self, record: EepromRecord) -> None:
+    def _populate(self, record: EepromRecord, skip_rtc_sync: bool = False) -> None:
         w = self._widgets
         w["format_version"].setValue(int(record.format_version))
         
@@ -241,19 +350,49 @@ class EepromManagerWidget(QtWidgets.QWidget):
         w["rtc_flags"].setText(f"{record.rtc_flags:08b}")
 
         # RTC synchronizace - samostatné položky
-        w["init_time"].setText(str(record.init_time))
-        w["init_time_label"].setText(self._format_timestamp(record.init_time))
-        
-        w["sync_time"].setText(str(record.sync_time))
-        w["sync_time_label"].setText(self._format_timestamp(record.sync_time))
-        
-        w["sync_rtc_seconds"].setText(str(record.sync_rtc_seconds))
+        # Při načítání ze souboru se RTC sync položky přeskočí (jsou read-only
+        # a spárované s reálným zařízením - nepřepisovat ze souboru).
+        if not skip_rtc_sync:
+            w["init_time"].setText(str(record.init_time))
+            w["init_time_label"].setText(self._format_timestamp(record.init_time))
+            
+            w["sync_time"].setText(str(record.sync_time))
+            w["sync_time_label"].setText(self._format_timestamp(record.sync_time))
+            
+            w["sync_rtc_seconds"].setText(str(record.sync_rtc_seconds))
 
-        # Kalibrační konstanty
+        # Kalibrační konstanty - uložené jako float32. Zobrazíme skutečnou
+        # float32 reprezentaci (round-trip přes struct 'f'), aby to, co uživatel
+        # vidí, odpovídalo tomu, co je v EEPROM.
         for widget, val in zip(w["calib"], record.calib):
-            widget.setValue(float(val))
+            widget.setText(self._format_float32(val))
         
         w["calib_ts"].setText(str(int(record.calib_ts)))
+        if "calib_ts_label" in w:
+            w["calib_ts_label"].setText(self._format_timestamp(int(record.calib_ts)))
+
+    def _on_calib_ts_now(self) -> None:
+        """Vloží aktuální Unix timestamp do pole calib_ts."""
+        import time
+        ts = int(time.time())
+        self._widgets["calib_ts"].setText(str(ts))
+        if "calib_ts_label" in self._widgets:
+            self._widgets["calib_ts_label"].setText(self._format_timestamp(ts))
+
+    def _update_serial_number(self) -> None:
+        """Vyčte SN z EEPROM SN čipu a zobrazí ho ve formuláři."""
+        if not self._read_sn:
+            self._widgets["serial_number"].setText("— (SN reader not connected)")
+            return
+        try:
+            sn = self._read_sn()
+            # SN z AT24CS64 je 128-bit integer - zobrazit jako hex
+            if isinstance(sn, int):
+                self._widgets["serial_number"].setText(f"0x{sn:032X}")
+            else:
+                self._widgets["serial_number"].setText(str(sn))
+        except Exception as exc:
+            self._widgets["serial_number"].setText(f"— (error: {exc})")
 
     # Handlers ------------------------------------------------------------
     def _on_load_device(self) -> None:
@@ -264,6 +403,8 @@ class EepromManagerWidget(QtWidgets.QWidget):
             with LoadingContext(self, "Loading EEPROM", "Reading data from device..."):
                 data = self._read_device()
                 record = unpack_record(data, verify_crc=False)
+                # Současně s EEPROM obsahem vyčteme i SN z EEPROM SN čipu.
+                self._update_serial_number()
             self._populate(record)
             self._set_status("✅ Loaded from device")
         except Exception as exc:
@@ -307,8 +448,12 @@ class EepromManagerWidget(QtWidgets.QWidget):
         try:
             data = Path(path).read_bytes()
             record = unpack_record(data, verify_crc=False)
-            self._populate(record)
-            self._set_status(f"✅ Loaded from file {Path(path).name}")
+            # RTC sync konstanty se při načítání ze souboru přeskočí -
+            # zůstanou stávající hodnoty (navázané na reálný RTC zařízení).
+            self._populate(record, skip_rtc_sync=True)
+            self._set_status(
+                f"✅ Loaded from file {Path(path).name} (RTC sync skipped)"
+            )
         except Exception as exc:
             self._set_status(f"❌ File load error: {exc}")
 
@@ -354,8 +499,11 @@ class EepromManagerWidget(QtWidgets.QWidget):
             sync_rtc_seconds_text = w["sync_rtc_seconds"].text().strip() or "0"
             sync_rtc_seconds = int(sync_rtc_seconds_text, 0)
             
-            # Kalibrační konstanty
-            calib_vals = [float(sp.value()) for sp in w["calib"]]
+            # Kalibrační konstanty - parsujeme z textových polí (float32).
+            calib_vals = []
+            for le in w["calib"]:
+                txt = le.text().strip().replace(",", ".") or "0"
+                calib_vals.append(float(txt))
             calib_ts_text = w["calib_ts"].text()
             calib_ts = int(calib_ts_text or "0", 0)
             
