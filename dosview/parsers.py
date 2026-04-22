@@ -29,38 +29,45 @@ class BaseLogParser:
         raise NotImplementedError
 
 
-class Airdos04CLogParser(BaseLogParser):
-    """Parser for AIRDOS04C log files."""
+class AirdosV2LogParser(BaseLogParser):
+    """Parser for AIRDOS log files using data format version 2.x."""
 
     @staticmethod
     def detect(file_path: str | Path) -> bool:
         with open(file_path, "r") as f:
             for line in f:
-                if line.startswith("$DOS") and "AIRDOS04C" in line:
-                    return True
+                if line.startswith("$DOS"):
+                    parts = line.strip().split(",")
+                    # parts[2] = fw-version; MAJOR.MINOR encodes the data format version
+                    if len(parts) > 2 and parts[2].startswith("2."):
+                        return True
         return False
 
     def parse(self):
         start_time = time.time()
-        print("AIRDOS04C parser start")
+        print("AIRDOS v2 parser start")
         metadata = {
             "log_runs_count": 0,
             "log_device_info": {},
             "log_info": {},
         }
-        hist = np.zeros(1024, dtype=int)
+        hist = np.zeros(65536, dtype=int)
         total_counts = 0
         sums: List[int] = []
         time_axis: List[float] = []
         inside_run = False
         current_hist = None
         current_counts = 0
+        device_type = "unknown"
+        env_records: List[Tuple[float, ...]] = []
+        batt_records: List[Tuple[float, ...]] = []
 
         with open(self.file_path, "r") as file:
             for line in file:
                 parts = line.strip().split(",")
                 match parts[0]:
                     case "$DOS":
+                        device_type = parts[1] if len(parts) > 1 else "unknown"
                         metadata["log_device_info"]["DOS"] = {
                             "type": parts[0],
                             "hw-model": parts[1],
@@ -83,8 +90,8 @@ class Airdos04CLogParser(BaseLogParser):
                                 current_counts += 1
                     case "$STOP":
                         if inside_run:
-                            if len(parts) > 4:
-                                for idx, val in enumerate(parts[4:]):
+                            if len(parts) > 5:
+                                for idx, val in enumerate(parts[5:]):
                                     try:
                                         current_hist[idx] += int(val)
                                     except ValueError:
@@ -95,6 +102,35 @@ class Airdos04CLogParser(BaseLogParser):
                             time_axis.append(float(parts[2]))
                         inside_run = False
                         current_hist = None
+                    case "$ENV":
+                        # $ENV,count,tm.tm_s100,T1,H1,T2,H2,T_MS5611,P_MS5611
+                        if len(parts) >= 9:
+                            try:
+                                env_records.append((
+                                    float(parts[2]),  # time
+                                    float(parts[3]),  # T1 (SHT31 primary)
+                                    float(parts[4]),  # H1
+                                    float(parts[5]),  # T2 (SHT31 secondary)
+                                    float(parts[6]),  # H2
+                                    float(parts[7]),  # T_MS5611
+                                    float(parts[8]),  # P_MS5611
+                                ))
+                            except ValueError:
+                                pass
+                    case "$BATT":
+                        # $BATT,count,tm.tm_s100,voltage_mV,current_mA,remaining_mAh,full_mAh,temp_C
+                        if len(parts) >= 8:
+                            try:
+                                batt_records.append((
+                                    float(parts[2]),  # time
+                                    float(parts[3]),  # voltage_mV
+                                    float(parts[4]),  # current_mA
+                                    float(parts[5]),  # remaining_mAh
+                                    float(parts[6]),  # full_charge_mAh
+                                    float(parts[7]),  # temperature_C
+                                ))
+                            except ValueError:
+                                pass
                     case _:
                         continue
 
@@ -102,10 +138,31 @@ class Airdos04CLogParser(BaseLogParser):
         metadata["log_info"]["events_total"] = int(total_counts)
         metadata["log_info"]["log_type_version"] = "2.0"
         metadata["log_info"]["log_type"] = "xDOS_SPECTRAL"
-        metadata["log_info"]["detector_type"] = "AIRDOS04C"
-        print("Parsed AIRDOS04C format in", time.time() - start_time, "s")
+        metadata["log_info"]["detector_type"] = device_type
 
-        return [np.array(time_axis), np.array(sums), hist, metadata]
+        telemetry: dict = {}
+        if env_records:
+            ea = np.array(env_records)
+            telemetry["temperature_0"] = (ea[:, 0], ea[:, 1])
+            telemetry["humidity_0"]    = (ea[:, 0], ea[:, 2])
+            telemetry["temperature_1"] = (ea[:, 0], ea[:, 3])
+            telemetry["humidity_1"]    = (ea[:, 0], ea[:, 4])
+            telemetry["temperature_2"] = (ea[:, 0], ea[:, 5])
+            telemetry["pressure_3"]    = (ea[:, 0], ea[:, 6])
+        if batt_records:
+            ba = np.array(batt_records)
+            telemetry["voltage"]            = (ba[:, 0], ba[:, 1])
+            telemetry["current"]            = (ba[:, 0], ba[:, 2])
+            telemetry["capacity_remaining"] = (ba[:, 0], ba[:, 3])
+            telemetry["capacity_full"]      = (ba[:, 0], ba[:, 4])
+            telemetry["temperature"]        = (ba[:, 0], ba[:, 5])
+
+        print("Parsed AIRDOS v2 format in", time.time() - start_time, "s")
+        return [np.array(time_axis), np.array(sums), hist, metadata, telemetry]
+
+
+# Backwards-compatible alias
+Airdos04CLogParser = AirdosV2LogParser
 
 
 class OldLogParser(BaseLogParser):
@@ -203,7 +260,7 @@ class OldLogParser(BaseLogParser):
         return [time_column, sums, hist, metadata]
 
 
-LOG_PARSERS: Sequence[type[BaseLogParser]] = [Airdos04CLogParser, OldLogParser]
+LOG_PARSERS: Sequence[type[BaseLogParser]] = [AirdosV2LogParser, OldLogParser]
 
 
 def get_parser_for_file(file_path: str | Path) -> BaseLogParser:
@@ -220,7 +277,8 @@ def parse_file(file_path: str | Path):
 
 __all__ = [
     "BaseLogParser",
-    "Airdos04CLogParser",
+    "AirdosV2LogParser",
+    "Airdos04CLogParser",  # backwards-compatible alias
     "OldLogParser",
     "get_parser_for_file",
     "parse_file",

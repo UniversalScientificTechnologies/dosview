@@ -87,22 +87,39 @@ class PlotCanvas(pg.GraphicsLayoutWidget):
         plot_evolution.plot(time_axis[window_size-1:], rolling_avg, pen=pen)
 
         ev_data = self.data[2]
-        plot_spectrum.plot(range(len(ev_data)), ev_data, 
+        plot_spectrum.plot(range(len(ev_data)), ev_data,
                         pen="r", symbol='x', symbolPen = 'g',
                         symbolBrush = 0.2, name = "Energy")
         plot_spectrum.setLabel("left", "Total count per channel", units="#")
         plot_spectrum.setLabel("bottom", "Channel", units="#")
 
-        # np_metadata = data[4]
-        
-        # print("METADATA")
-        # print(np_metadata[:,0]/60)
-        # print(np_metadata[:,6])
-        # plot_evolution.plot(np_metadata[:,0]/60, np_metadata[:,6], pen="b", symbol='p', symbolPen='b', symbolBrush=0.1, name="Pressure")
-
-
         plot_spectrum.setLogMode(x=True, y=True)
         plot_spectrum.showGrid(x=True, y=True)
+
+        if len(self.data) > 4 and self.data[4]:
+            telemetry = self.data[4]
+            plot_telemetry = self.addPlot(row=2, col=0)
+            plot_telemetry.showGrid(x=True, y=True)
+            plot_telemetry.setLabel("bottom", "Time", units="min")
+            plot_telemetry.addLegend()
+
+            colors = {
+                "temperature_0": (220, 50, 50),
+                "humidity_0":    (50, 100, 220),
+                "temperature_1": (220, 130, 50),
+                "humidity_1":    (50, 180, 220),
+                "temperature_2": (180, 50, 180),
+                "pressure_3":    (50, 200, 100),
+                "voltage":       (240, 240, 50),
+                "current":       (200, 50, 200),
+                "capacity_remaining": (100, 220, 150),
+                "capacity_full":      (150, 150, 150),
+                "temperature":   (220, 100, 100),
+            }
+            for key, (t, vals) in telemetry.items():
+                pen = pg.mkPen(color=colors.get(key, (200, 200, 200)), width=2)
+                line = plot_telemetry.plot(t / 60, vals, pen=pen, name=key)
+                self.telemetry_lines[key] = line
 
         print("PLOT DURATION ... ", time.time()-start_time)
 
@@ -804,6 +821,11 @@ class PlotTab(QWidget):
         self.upload_file_button.setMaximumHeight(20)
         self.upload_file_button.clicked.connect(lambda: UploadFileDialog().exec_())
 
+        self.export_csv_button = QPushButton("Export spectrum")
+        self.export_csv_button.setMaximumHeight(20)
+        self.export_csv_button.clicked.connect(self.export_spectrum_csv)
+        self.export_csv_button.setEnabled(False)
+
         log_view_widget = QWidget()
 
         self.left_panel = QSplitter(Qt.Vertical)
@@ -814,6 +836,7 @@ class PlotTab(QWidget):
         vb = QHBoxLayout()
         vb.addWidget(self.open_img_view_button)
         vb.addWidget(self.upload_file_button)
+        vb.addWidget(self.export_csv_button)
         self.left_panel.setLayout(vb)
 
         self.logView_splitter = QSplitter(Qt.Horizontal)
@@ -843,8 +866,9 @@ class PlotTab(QWidget):
         self.load_data_thread.start()
 
     def on_data_loaded(self, data):
-        self.data = data # TODO>.. tohle do budoucna zrusit a nahradit tridou parseru.. 
+        self.data = data # TODO>.. tohle do budoucna zrusit a nahradit tridou parseru..
         print("Data are fully loaded...")
+        self.export_csv_button.setEnabled(True)
         self.plot_canvas.plot(data)
         print("After plot data canvas")
         
@@ -888,11 +912,27 @@ class PlotTab(QWidget):
 
 
     def open_spectrogram_view(self):
-        matrix = self.data[-1] #TODO .. tohle predelat na nejakou tridu pro parserovani 
+        matrix = self.data[3]  # metadata dict (spectrogram view)
 
         w = DataSpectrumView(self)
         w.show()
         w.plot_data(matrix)
+
+    def export_spectrum_csv(self):
+        path, _ = QFileDialog.getSaveFileName(
+            self, "Export spectrum", "", "CSV files (*.csv)"
+        )
+        if not path:
+            return
+        if not path.endswith(".csv"):
+            path += ".csv"
+        import csv
+        hist = self.data[2]
+        with open(path, "w", newline="") as f:
+            writer = csv.writer(f)
+            writer.writerow(["channel", "counts"])
+            for ch, cnt in enumerate(hist):
+                writer.writerow([ch, int(cnt)])
 
 
 class UploadFileDialog(QDialog):
