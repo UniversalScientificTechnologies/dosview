@@ -72,16 +72,6 @@ class CalibrationTab(QWidget):
         left_layout.setAlignment(Qt.AlignTop)
         left_widget.setLayout(left_layout)
 
-        project_group = QGroupBox("Project")
-        project_layout = QHBoxLayout()
-        project_load_button = QPushButton("Load")
-        project_load_button.clicked.connect(self.load_project)
-        project_save_button = QPushButton("Save")
-        project_save_button.clicked.connect(self.save_project)
-        project_layout.addWidget(project_load_button)
-        project_layout.addWidget(project_save_button)
-        project_group.setLayout(project_layout)
-
         logs_group = QGroupBox("Logs")
         logs_layout = QVBoxLayout()
         self.log_table = QTableWidget(0, 2)
@@ -161,7 +151,6 @@ class CalibrationTab(QWidget):
         energy_layout.addLayout(energy_buttons)
         energy_group.setLayout(energy_layout)
 
-        left_layout.addWidget(project_group)
         left_layout.addWidget(logs_group)
         left_layout.addWidget(points_group)
         left_layout.addWidget(constants_group)
@@ -745,17 +734,18 @@ class CalibrationTab(QWidget):
         except Exception as exc:
             QMessageBox.warning(self, "Save error", f"Failed to save project: {exc}")
 
-    def load_project(self):
-        file_path, _ = QFileDialog.getOpenFileName(
-            self,
-            "Load calibration project",
-            "",
-            "Calibration project (*.dosview_calib);;All files (*)"
-        )
-        if not file_path:
+    def load_project(self, path=None):
+        if path is None:
+            path, _ = QFileDialog.getOpenFileName(
+                self,
+                "Load calibration project",
+                "",
+                "Calibration project (*.dosview_calib);;All files (*)"
+            )
+        if not path:
             return
         try:
-            with open(file_path, "r", encoding="utf-8") as handle:
+            with open(path, "r", encoding="utf-8") as handle:
                 payload = json.load(handle)
         except Exception as exc:
             QMessageBox.warning(self, "Load error", f"Failed to load project: {exc}")
