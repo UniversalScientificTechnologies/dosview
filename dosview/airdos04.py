@@ -313,10 +313,8 @@ class Airdos04Hardware:
             data = self.read_eeprom(TOTAL_SIZE, start_address=0, eeprom_address=eeprom_address)
             record = unpack_record(data, verify_crc=False)
             
-            init_time = record.init_time
-            sync_time = record.sync_time
-            sync_rtc_seconds = record.sync_rtc_seconds
-            
+            init_time, sync_time, sync_rtc_seconds = record.rtc_history[0]
+
             if init_time > 0 or sync_time > 0:
                 return (init_time, sync_time, sync_rtc_seconds)
             
@@ -370,16 +368,16 @@ class Airdos04Hardware:
             data = self.read_eeprom(TOTAL_SIZE, start_address=0, eeprom_address=eeprom_address)
             print(f"[sync_rtc] EEPROM data vyčteno, velikost: {len(data)} bytů")
             record = unpack_record(data, verify_crc=False)
-            print(f"[sync_rtc] init_time (NEMĚNÍ SE): {record.init_time}")
+            print(f"[sync_rtc] init_time (NEMĚNÍ SE): {record.rtc_history[0][0]}")
         except Exception as e:
             # Pokud se nepodaří vyčíst, vytvoříme nový záznam
             print(f"[sync_rtc] Chyba při čtení EEPROM: {e}, vytváříme nový záznam")
             from .eeprom_schema import EepromRecord
             record = EepromRecord()
-        
-        # Aktualizace RTC sync dat (init_time se NEMĚNÍ!)
-        record.sync_time = sync_time
-        record.sync_rtc_seconds = sync_rtc_seconds
+
+        # Aktualizace RTC sync dat — přepisujeme entry 0, init_time se NEMĚNÍ
+        prev_init, _, _ = record.rtc_history[0]
+        record.rtc_history[0] = (prev_init, sync_time, sync_rtc_seconds)
         print(f"[sync_rtc] Záznam aktualizován: sync_time={sync_time}, sync_rtc_seconds={sync_rtc_seconds}")
         
         # Zápis do EEPROM
@@ -434,10 +432,8 @@ class Airdos04Hardware:
             from .eeprom_schema import EepromRecord
             record = EepromRecord()
         
-        # Zápis timestampu resetu do EEPROM
-        record.init_time = reset_timestamp
-        record.sync_time = reset_timestamp  # Při resetu je RTC=0, takže sync_time = init_time
-        record.sync_rtc_seconds = 0
+        # Zápis timestampu resetu do EEPROM — entry 0: RTC=0, init=sync=reset_timestamp
+        record.rtc_history[0] = (reset_timestamp, reset_timestamp, 0)
         
         # Zápis do EEPROM
         payload = pack_record(record, with_crc=True)

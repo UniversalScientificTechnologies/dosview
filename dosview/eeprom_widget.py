@@ -84,57 +84,55 @@ class EepromManagerWidget(QtWidgets.QWidget):
 
         # === Hardware ===
         form_layout.addRow(self._make_section_label("Hardware"))
-        
-        hw_layout = QtWidgets.QHBoxLayout()
-        self._widgets["hw_rev_major"] = self._make_int_field(minv=0, maxv=255)
-        self._widgets["hw_rev_minor"] = self._make_int_field(minv=0, maxv=255)
-        hw_layout.addWidget(self._widgets["hw_rev_major"])
-        hw_layout.addWidget(QtWidgets.QLabel("."))
-        hw_layout.addWidget(self._widgets["hw_rev_minor"])
-        hw_layout.addStretch(1)
-        form_layout.addRow("HW revision:", hw_layout)
 
-        self._widgets["device_id"] = self._make_line_edit(max_length=10)
-        form_layout.addRow("Device ID (max 10 chars):", self._widgets["device_id"])
+        hw_layout = QtWidgets.QHBoxLayout()
+        self._widgets["device_version"] = self._make_int_field(minv=0, maxv=255)
+        self._widgets["hardware_revision"] = self._make_int_field(minv=0, maxv=255)
+        hw_layout.addWidget(self._widgets["device_version"])
+        hw_layout.addWidget(QtWidgets.QLabel("rev"))
+        hw_layout.addWidget(self._widgets["hardware_revision"])
+        hw_layout.addStretch(1)
+        form_layout.addRow("Device version / HW revision:", hw_layout)
+
+        self._widgets["device_identifier"] = self._make_line_edit(max_length=24)
+        form_layout.addRow("Device identifier (max 24 chars):", self._widgets["device_identifier"])
 
         # === Configuration ===
         form_layout.addRow(self._make_section_label("Configuration"))
-        
-        self._widgets["config_flags"] = self._make_binary_field(bits=32)
-        form_layout.addRow("Config flags (bin):", self._widgets["config_flags"])
+
+        self._widgets["operating_modes"] = self._make_binary_field(bits=16)
+        form_layout.addRow("Operating modes (bin):", self._widgets["operating_modes"])
 
         self._widgets["rtc_flags"] = self._make_binary_field(bits=8)
         form_layout.addRow("RTC flags (bin):", self._widgets["rtc_flags"])
 
-        # === RTC synchronization ===
-        form_layout.addRow(self._make_section_label("RTC Synchronization"))
-        
-        rtc_info = QtWidgets.QLabel("Timestamps for RTC clock synchronization")
+        # === RTC history (most recent entry) ===
+        form_layout.addRow(self._make_section_label("RTC History (entry 0 — most recent)"))
+
+        rtc_info = QtWidgets.QLabel("Up to 5 RTC synchronisation entries are stored; editing affects entry 0 only.")
         rtc_info.setStyleSheet("color: gray; font-size: 10px;")
+        rtc_info.setWordWrap(True)
         form_layout.addRow("", rtc_info)
-        
-        # Init time (kdy RTC bylo na 0)
-        self._widgets["init_time"] = self._make_line_edit()
-        self._widgets["init_time"].setPlaceholderText("Unix timestamp (s)")
-        form_layout.addRow("Init time:", self._widgets["init_time"])
-        
-        self._widgets["init_time_label"] = QtWidgets.QLabel("")
-        self._widgets["init_time_label"].setStyleSheet("color: #666; font-style: italic;")
-        form_layout.addRow("", self._widgets["init_time_label"])
-        
-        # Sync time (čas poslední synchronizace)
-        self._widgets["sync_time"] = self._make_line_edit()
-        self._widgets["sync_time"].setPlaceholderText("Unix timestamp (s)")
-        form_layout.addRow("Sync time:", self._widgets["sync_time"])
-        
-        self._widgets["sync_time_label"] = QtWidgets.QLabel("")
-        self._widgets["sync_time_label"].setStyleSheet("color: #666; font-style: italic;")
-        form_layout.addRow("", self._widgets["sync_time_label"])
-        
-        # Sync RTC seconds (RTC value at synchronization)
-        self._widgets["sync_rtc_seconds"] = self._make_line_edit()
-        self._widgets["sync_rtc_seconds"].setPlaceholderText("RTC seconds at sync")
-        form_layout.addRow("Sync RTC seconds:", self._widgets["sync_rtc_seconds"])
+
+        self._widgets["rtc_init_ts"] = self._make_line_edit()
+        self._widgets["rtc_init_ts"].setPlaceholderText("Unix timestamp (s)")
+        form_layout.addRow("RTC init timestamp:", self._widgets["rtc_init_ts"])
+
+        self._widgets["rtc_init_ts_label"] = QtWidgets.QLabel("")
+        self._widgets["rtc_init_ts_label"].setStyleSheet("color: #666; font-style: italic;")
+        form_layout.addRow("", self._widgets["rtc_init_ts_label"])
+
+        self._widgets["rtc_ref_ts"] = self._make_line_edit()
+        self._widgets["rtc_ref_ts"].setPlaceholderText("Unix timestamp (s)")
+        form_layout.addRow("Reference timestamp:", self._widgets["rtc_ref_ts"])
+
+        self._widgets["rtc_ref_ts_label"] = QtWidgets.QLabel("")
+        self._widgets["rtc_ref_ts_label"].setStyleSheet("color: #666; font-style: italic;")
+        form_layout.addRow("", self._widgets["rtc_ref_ts_label"])
+
+        self._widgets["rtc_value_at_ref"] = self._make_line_edit()
+        self._widgets["rtc_value_at_ref"].setPlaceholderText("RTC seconds at reference")
+        form_layout.addRow("RTC value at reference:", self._widgets["rtc_value_at_ref"])
 
         # === keV calibration ===
         form_layout.addRow(self._make_section_label("keV Calibration"))
@@ -143,16 +141,16 @@ class EepromManagerWidget(QtWidgets.QWidget):
         calib_info.setStyleSheet("color: gray; font-size: 10px;")
         form_layout.addRow("", calib_info)
         
-        self._widgets["calib"] = []
+        self._widgets["calibration_constants"] = []
         calib_labels = ["a₀ (offset) [keV]:", "a₁ (linear) [keV/ch]:", "a₂ (quadratic) [keV/ch²]:"]
         for i, label in enumerate(calib_labels):
-            field = self._make_double_field()
-            self._widgets["calib"].append(field)
-            form_layout.addRow(label, field)
+            f = self._make_double_field()
+            self._widgets["calibration_constants"].append(f)
+            form_layout.addRow(label, f)
 
-        self._widgets["calib_ts"] = self._make_line_edit()
-        self._widgets["calib_ts"].setPlaceholderText("Unix timestamp")
-        form_layout.addRow("Calibration timestamp:", self._widgets["calib_ts"])
+        self._widgets["calibration_version"] = self._make_line_edit()
+        self._widgets["calibration_version"].setPlaceholderText("Unix timestamp")
+        form_layout.addRow("Calibration version (timestamp):", self._widgets["calibration_version"])
 
         layout.addWidget(scroll)
 
@@ -226,34 +224,31 @@ class EepromManagerWidget(QtWidgets.QWidget):
     def _populate(self, record: EepromRecord) -> None:
         w = self._widgets
         w["format_version"].setValue(int(record.format_version))
-        
+
         idx = w["device_type"].findData(int(record.device_type))
         if idx >= 0:
             w["device_type"].setCurrentIndex(idx)
-        
+
         w["crc32"].setText(f"0x{record.crc32:08X}")
-        w["hw_rev_major"].setValue(int(record.hw_rev_major))
-        w["hw_rev_minor"].setValue(int(record.hw_rev_minor))
-        w["device_id"].setText(record.device_id)
-        
-        # Binární zobrazení flagů
-        w["config_flags"].setText(f"{record.config_flags:032b}")
+        w["device_version"].setValue(int(record.device_version))
+        w["hardware_revision"].setValue(int(record.hardware_revision))
+        w["device_identifier"].setText(record.device_identifier)
+
+        w["operating_modes"].setText(f"{record.operating_modes:016b}")
         w["rtc_flags"].setText(f"{record.rtc_flags:08b}")
 
-        # RTC synchronizace - samostatné položky
-        w["init_time"].setText(str(record.init_time))
-        w["init_time_label"].setText(self._format_timestamp(record.init_time))
-        
-        w["sync_time"].setText(str(record.sync_time))
-        w["sync_time_label"].setText(self._format_timestamp(record.sync_time))
-        
-        w["sync_rtc_seconds"].setText(str(record.sync_rtc_seconds))
+        # RTC history entry 0
+        init_ts, ref_ts, rtc_val = record.rtc_history[0] if record.rtc_history else (0, 0, 0)
+        w["rtc_init_ts"].setText(str(init_ts))
+        w["rtc_init_ts_label"].setText(self._format_timestamp(init_ts))
+        w["rtc_ref_ts"].setText(str(ref_ts))
+        w["rtc_ref_ts_label"].setText(self._format_timestamp(ref_ts))
+        w["rtc_value_at_ref"].setText(str(rtc_val))
 
-        # Kalibrační konstanty
-        for widget, val in zip(w["calib"], record.calib):
+        for widget, val in zip(w["calibration_constants"], record.calibration_constants):
             widget.setValue(float(val))
-        
-        w["calib_ts"].setText(str(int(record.calib_ts)))
+
+        w["calibration_version"].setText(str(int(record.calibration_version)))
 
     # Handlers ------------------------------------------------------------
     def _on_load_device(self) -> None:
@@ -333,48 +328,37 @@ class EepromManagerWidget(QtWidgets.QWidget):
         try:
             format_version = int(w["format_version"].value())
             device_type = DeviceType(w["device_type"].currentData())
-            hw_rev_major = int(w["hw_rev_major"].value())
-            hw_rev_minor = int(w["hw_rev_minor"].value())
-            device_id = w["device_id"].text()
-            
-            # Parsování binárních flagů
-            config_flags_text = w["config_flags"].text().strip() or "0"
-            config_flags = int(config_flags_text, 2)
-            
+            device_version = int(w["device_version"].value())
+            hardware_revision = int(w["hardware_revision"].value())
+            device_identifier = w["device_identifier"].text()
+
+            operating_modes_text = w["operating_modes"].text().strip() or "0"
+            operating_modes = int(operating_modes_text, 2)
+
             rtc_flags_text = w["rtc_flags"].text().strip() or "0"
             rtc_flags = int(rtc_flags_text, 2)
-            
-            # RTC synchronizace - samostatné položky
-            init_time_text = w["init_time"].text().strip() or "0"
-            init_time = int(init_time_text, 0)
-            
-            sync_time_text = w["sync_time"].text().strip() or "0"
-            sync_time = int(sync_time_text, 0)
-            
-            sync_rtc_seconds_text = w["sync_rtc_seconds"].text().strip() or "0"
-            sync_rtc_seconds = int(sync_rtc_seconds_text, 0)
-            
-            # Kalibrační konstanty
-            calib_vals = [float(sp.value()) for sp in w["calib"]]
-            calib_ts_text = w["calib_ts"].text()
-            calib_ts = int(calib_ts_text or "0", 0)
-            
+
+            init_ts = int(w["rtc_init_ts"].text().strip() or "0", 0)
+            ref_ts = int(w["rtc_ref_ts"].text().strip() or "0", 0)
+            rtc_val = int(w["rtc_value_at_ref"].text().strip() or "0", 0)
+
+            calib_vals = [float(sp.value()) for sp in w["calibration_constants"]]
+            calibration_version = int(w["calibration_version"].text() or "0", 0)
+
         except Exception as exc:
             raise ValueError(f"Invalid form value: {exc}") from exc
 
         record = EepromRecord(
             format_version=format_version,
             device_type=device_type,
-            hw_rev_major=hw_rev_major,
-            hw_rev_minor=hw_rev_minor,
-            device_id=device_id,
-            config_flags=config_flags,
+            device_version=device_version,
+            hardware_revision=hardware_revision,
+            device_identifier=device_identifier,
+            operating_modes=operating_modes,
             rtc_flags=rtc_flags,
-            init_time=init_time,
-            sync_time=sync_time,
-            sync_rtc_seconds=sync_rtc_seconds,
-            calib=tuple(calib_vals),
-            calib_ts=calib_ts,
+            rtc_history=[(init_ts, ref_ts, rtc_val)] + [(0, 0, 0)] * 4,
+            calibration_constants=tuple(calib_vals),
+            calibration_version=calibration_version,
         )
         payload = pack_record(record, with_crc=True)
         record.crc32 = compute_crc32(payload)
@@ -406,17 +390,18 @@ def _demo():
     import time
     demo_record = EepromRecord(
         format_version=1,
-        device_type=DeviceType.AIRDOS04,
-        hw_rev_major=2,
-        hw_rev_minor=1,
-        device_id="AIRDOS001",
-        config_flags=0b00000001,
+        device_type=DeviceType.AIRDOS,
+        device_version=4,
+        hardware_revision=ord('C'),
+        device_identifier="AIRDOS04C-001",
+        operating_modes=0b0000000000000001,
         rtc_flags=0b00000011,
-        init_time=int(time.time()) - 86400,    # Před 24 hodinami (kdy RTC=0)
-        sync_time=int(time.time()) - 3600,     # Před hodinou (poslední sync)
-        sync_rtc_seconds=82800,                # 23 hodin v sekundách (RTC při sync)
-        calib=(0.5, 0.125, 0.00001),  # Příklad: offset, lineární, kvadratický
-        calib_ts=1702500000,
+        rtc_history=[
+            (int(time.time()) - 86400, int(time.time()) - 3600, 82800),
+            (0, 0, 0), (0, 0, 0), (0, 0, 0), (0, 0, 0),
+        ],
+        calibration_constants=(0.5, 0.125, 0.00001),
+        calibration_version=1702500000,
     )
     mem = {"blob": pack_record(demo_record, with_crc=True)}
 
