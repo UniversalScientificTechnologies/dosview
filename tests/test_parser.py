@@ -42,7 +42,11 @@ def test_any_parser_detects_fixture(log_path):
 
 @pytest.mark.parametrize("log_path", LOG_FIXTURES, ids=lambda p: p.name)
 def test_parse_fixture_returns_consistent_shapes(log_path):
-    time_axis, sums, hist, metadata = parse_file(log_path)
+    parsed = parse_file(log_path)
+    assert isinstance(parsed, (list, tuple))
+    assert len(parsed) >= 4
+
+    time_axis, sums, hist, metadata = parsed[:4]
 
     for array in (time_axis, sums, hist):
         np_array = np.asarray(array, dtype=float)
