@@ -230,6 +230,7 @@ class AIRDOS04CTRL(QThread):
                     else:
                         hid_interface_uart = hidDevice
 
+
             if hid_interface_i2c is None or hid_interface_uart is None:
                 self.loadingStateChanged.emit(False, "")
                 self.errorOccurred.emit("AIRDOS device not found.\nPlease check that the device is connected via USB.")
@@ -868,7 +869,7 @@ class AirdosConfigTab(QWidget):
         layout.addWidget(splitter)
         self.setLayout(layout)
 
-    def _open_eeprom_manager(self, read_addr: int):
+    def _open_eeprom_manager(self, read_addr: int, module_type: str = "detector"):
         def _log_eeprom(kind, message, data=None, *, full=False):
             colors = {"read": "\x1b[32m", "write": "\x1b[33m", "info": "\x1b[36m"}
             prefix = f"[EEPROM][{kind.upper()}]"
@@ -895,8 +896,17 @@ class AirdosConfigTab(QWidget):
                 _log_eeprom(
                     "write", f"Demo mode: would write {len(blob)} bytes", data=bytes(blob[:16])
                 )
+            read_sn = None
         else:
             hw = self.i2c_thread.hw
+            
+            # SN adresa podle typu modulu:
+            #   detektor (USTSIPIN analogová deska) → an_eeprom_sn (0x5B)
+            #   battery  (BatDatUnit hlavní deska)  → eeprom_sn    (0x58)
+            if module_type == "detector":
+                sn_addr = hw.addr.an_eeprom_sn
+            else:
+                sn_addr = hw.addr.eeprom_sn
             
             def read_device() -> bytes:
                 try:
@@ -905,8 +915,8 @@ class AirdosConfigTab(QWidget):
                     
                     # Debug: read serial number
                     try:
-                        sn = hw.read_serial_number(hw.addr.eeprom_sn)
-                        print(f"EEPROM SN: {hex(sn)}")
+                        sn = hw.read_serial_number(sn_addr)
+                        print(f"EEPROM SN (addr=0x{sn_addr:02X}): {hex(sn)}")
                     except Exception as e:
                         print(f"Warning: Could not read EEPROM SN: {e}")
                     
@@ -936,6 +946,15 @@ class AirdosConfigTab(QWidget):
                 finally:
                     hw.set_i2c_direction(to_usb=False)
 
+            def read_sn() -> int:
+                # I2C směr už nastavuje volající (read_device drive). Zde to pro
+                # případ samostatného volání zajistíme explicitně.
+                try:
+                    hw.set_i2c_direction(to_usb=True)
+                    return hw.read_serial_number(sn_addr)
+                finally:
+                    hw.set_i2c_direction(to_usb=False)
+
         dlg = QDialog(self)
         dlg.setWindowTitle(f"EEPROM Manager (addr=0x{read_addr:02X})")
         v = QVBoxLayout(dlg)
@@ -943,7 +962,9 @@ class AirdosConfigTab(QWidget):
         w = EepromManagerWidget(
             read_device=read_device,
             write_device=write_device,
+            read_sn=read_sn,
             io_context=self.i2c_thread,
+            module_type=module_type,
         )
         v.addWidget(w)
         btn_close = QPushButton("Close")
@@ -955,16 +976,16 @@ class AirdosConfigTab(QWidget):
     def open_eeprom_manager_detector(self):
         """Open EEPROM manager for the analogue board (USTSIPIN)."""
         if self.i2c_thread.hw:
-            self._open_eeprom_manager(self.i2c_thread.hw.addr.an_eeprom)
+            self._open_eeprom_manager(self.i2c_thread.hw.addr.an_eeprom, module_type="detector")
         else:
-            self._open_eeprom_manager(0x53)  # fallback address
+            self._open_eeprom_manager(0x53, module_type="detector")  # fallback address
 
     def open_eeprom_manager_battery(self):
         """Open EEPROM manager for the BatDatUnit."""
         if self.i2c_thread.hw:
-            self._open_eeprom_manager(self.i2c_thread.hw.addr.eeprom)
+            self._open_eeprom_manager(self.i2c_thread.hw.addr.eeprom, module_type="battery")
         else:
-            self._open_eeprom_manager(0x50)  # fallback address
+            self._open_eeprom_manager(0x50, module_type="battery")  # fallback address
 
     def open_rtc_manager(self):
         """Open the RTC manager for detector clock management."""
