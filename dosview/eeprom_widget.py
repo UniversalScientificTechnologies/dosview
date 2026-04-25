@@ -93,18 +93,18 @@ class EepromManagerWidget(QtWidgets.QWidget):
 
         # === Hardware ===
         form_layout.addRow(self._make_section_label("Hardware"))
-        
-        hw_layout = QtWidgets.QHBoxLayout()
-        self._widgets["hw_rev_major"] = self._make_int_field(minv=0, maxv=255)
-        self._widgets["hw_rev_minor"] = self._make_int_field(minv=0, maxv=255)
-        hw_layout.addWidget(self._widgets["hw_rev_major"])
-        hw_layout.addWidget(QtWidgets.QLabel("."))
-        hw_layout.addWidget(self._widgets["hw_rev_minor"])
-        hw_layout.addStretch(1)
-        form_layout.addRow("HW revision:", hw_layout)
 
-        self._widgets["device_id"] = self._make_line_edit(max_length=10)
-        form_layout.addRow("Device ID (max 10 chars):", self._widgets["device_id"])
+        hw_layout = QtWidgets.QHBoxLayout()
+        self._widgets["device_version"] = self._make_int_field(minv=0, maxv=255)
+        self._widgets["hardware_revision"] = self._make_int_field(minv=0, maxv=255)
+        hw_layout.addWidget(self._widgets["device_version"])
+        hw_layout.addWidget(QtWidgets.QLabel("rev"))
+        hw_layout.addWidget(self._widgets["hardware_revision"])
+        hw_layout.addStretch(1)
+        form_layout.addRow("Device version / HW revision:", hw_layout)
+
+        self._widgets["device_identifier"] = self._make_line_edit(max_length=24)
+        form_layout.addRow("Device identifier (max 24 chars):", self._widgets["device_identifier"])
 
         # Serial number (vyčtené z EEPROM SN, read-only)
         self._widgets["serial_number"] = self._make_line_edit(readonly=True)
@@ -116,9 +116,9 @@ class EepromManagerWidget(QtWidgets.QWidget):
 
         # === Configuration ===
         form_layout.addRow(self._make_section_label("Configuration"))
-        
-        self._widgets["config_flags"] = self._make_binary_field(bits=32)
-        form_layout.addRow("Config flags (bin):", self._widgets["config_flags"])
+
+        self._widgets["operating_modes"] = self._make_binary_field(bits=16)
+        form_layout.addRow("Operating modes (bin):", self._widgets["operating_modes"])
 
         self._widgets["rtc_flags"] = self._make_binary_field(bits=8)
         form_layout.addRow("RTC flags (bin):", self._widgets["rtc_flags"])
@@ -335,41 +335,41 @@ class EepromManagerWidget(QtWidgets.QWidget):
     def _populate(self, record: EepromRecord, skip_rtc_sync: bool = False) -> None:
         w = self._widgets
         w["format_version"].setValue(int(record.format_version))
-        
+
         idx = w["device_type"].findData(int(record.device_type))
         if idx >= 0:
             w["device_type"].setCurrentIndex(idx)
-        
+
         w["crc32"].setText(f"0x{record.crc32:08X}")
-        w["hw_rev_major"].setValue(int(record.hw_rev_major))
-        w["hw_rev_minor"].setValue(int(record.hw_rev_minor))
-        w["device_id"].setText(record.device_id)
-        
-        # Binární zobrazení flagů
-        w["config_flags"].setText(f"{record.config_flags:032b}")
+        w["device_version"].setValue(int(record.device_version))
+        w["hardware_revision"].setValue(int(record.hardware_revision))
+        w["device_identifier"].setText(record.device_identifier)
+
+        w["operating_modes"].setText(f"{record.operating_modes:016b}")
         w["rtc_flags"].setText(f"{record.rtc_flags:08b}")
 
         # RTC synchronizace - samostatné položky
         # Při načítání ze souboru se RTC sync položky přeskočí (jsou read-only
         # a spárované s reálným zařízením - nepřepisovat ze souboru).
+        init_ts, ref_ts, rtc_val = record.rtc_history[0] if record.rtc_history else (0, 0, 0)
         if not skip_rtc_sync:
-            w["init_time"].setText(str(record.init_time))
-            w["init_time_label"].setText(self._format_timestamp(record.init_time))
-            
-            w["sync_time"].setText(str(record.sync_time))
-            w["sync_time_label"].setText(self._format_timestamp(record.sync_time))
-            
-            w["sync_rtc_seconds"].setText(str(record.sync_rtc_seconds))
+            w["init_time"].setText(str(init_ts))
+            w["init_time_label"].setText(self._format_timestamp(init_ts))
+
+            w["sync_time"].setText(str(ref_ts))
+            w["sync_time_label"].setText(self._format_timestamp(ref_ts))
+
+            w["sync_rtc_seconds"].setText(str(rtc_val))
 
         # Kalibrační konstanty - uložené jako float32. Zobrazíme skutečnou
         # float32 reprezentaci (round-trip přes struct 'f'), aby to, co uživatel
         # vidí, odpovídalo tomu, co je v EEPROM.
-        for widget, val in zip(w["calib"], record.calib):
+        for widget, val in zip(w["calib"], record.calibration_constants):
             widget.setText(self._format_float32(val))
-        
-        w["calib_ts"].setText(str(int(record.calib_ts)))
+
+        w["calib_ts"].setText(str(int(record.calibration_version)))
         if "calib_ts_label" in w:
-            w["calib_ts_label"].setText(self._format_timestamp(int(record.calib_ts)))
+            w["calib_ts_label"].setText(self._format_timestamp(int(record.calibration_version)))
 
     def _on_calib_ts_now(self) -> None:
         """Vloží aktuální Unix timestamp do pole calib_ts."""
@@ -478,27 +478,25 @@ class EepromManagerWidget(QtWidgets.QWidget):
         try:
             format_version = int(w["format_version"].value())
             device_type = DeviceType(w["device_type"].currentData())
-            hw_rev_major = int(w["hw_rev_major"].value())
-            hw_rev_minor = int(w["hw_rev_minor"].value())
-            device_id = w["device_id"].text()
-            
-            # Parsování binárních flagů
-            config_flags_text = w["config_flags"].text().strip() or "0"
-            config_flags = int(config_flags_text, 2)
-            
+            device_version = int(w["device_version"].value())
+            hardware_revision = int(w["hardware_revision"].value())
+            device_identifier = w["device_identifier"].text()
+
+            operating_modes_text = w["operating_modes"].text().strip() or "0"
+            operating_modes = int(operating_modes_text, 2)
+
             rtc_flags_text = w["rtc_flags"].text().strip() or "0"
             rtc_flags = int(rtc_flags_text, 2)
-            
             # RTC synchronizace - samostatné položky
             init_time_text = w["init_time"].text().strip() or "0"
             init_time = int(init_time_text, 0)
-            
+
             sync_time_text = w["sync_time"].text().strip() or "0"
             sync_time = int(sync_time_text, 0)
-            
+
             sync_rtc_seconds_text = w["sync_rtc_seconds"].text().strip() or "0"
             sync_rtc_seconds = int(sync_rtc_seconds_text, 0)
-            
+
             # Kalibrační konstanty - parsujeme z textových polí (float32).
             calib_vals = []
             for le in w["calib"]:
@@ -506,23 +504,20 @@ class EepromManagerWidget(QtWidgets.QWidget):
                 calib_vals.append(float(txt))
             calib_ts_text = w["calib_ts"].text()
             calib_ts = int(calib_ts_text or "0", 0)
-            
         except Exception as exc:
             raise ValueError(f"Invalid form value: {exc}") from exc
 
         record = EepromRecord(
             format_version=format_version,
             device_type=device_type,
-            hw_rev_major=hw_rev_major,
-            hw_rev_minor=hw_rev_minor,
-            device_id=device_id,
-            config_flags=config_flags,
+            device_version=device_version,
+            hardware_revision=hardware_revision,
+            device_identifier=device_identifier,
+            operating_modes=operating_modes,
             rtc_flags=rtc_flags,
-            init_time=init_time,
-            sync_time=sync_time,
-            sync_rtc_seconds=sync_rtc_seconds,
-            calib=tuple(calib_vals),
-            calib_ts=calib_ts,
+            rtc_history=[(init_time, sync_time, sync_rtc_seconds)] + [(0, 0, 0)] * 4,
+            calibration_constants=tuple(calib_vals),
+            calibration_version=calib_ts,
         )
         payload = pack_record(record, with_crc=True)
         record.crc32 = compute_crc32(payload)
@@ -554,17 +549,18 @@ def _demo():
     import time
     demo_record = EepromRecord(
         format_version=1,
-        device_type=DeviceType.AIRDOS04,
-        hw_rev_major=2,
-        hw_rev_minor=1,
-        device_id="AIRDOS001",
-        config_flags=0b00000001,
+        device_type=DeviceType.AIRDOS,
+        device_version=4,
+        hardware_revision=ord('C'),
+        device_identifier="AIRDOS04C-001",
+        operating_modes=0b0000000000000001,
         rtc_flags=0b00000011,
-        init_time=int(time.time()) - 86400,    # Před 24 hodinami (kdy RTC=0)
-        sync_time=int(time.time()) - 3600,     # Před hodinou (poslední sync)
-        sync_rtc_seconds=82800,                # 23 hodin v sekundách (RTC při sync)
-        calib=(0.5, 0.125, 0.00001),  # Příklad: offset, lineární, kvadratický
-        calib_ts=1702500000,
+        rtc_history=[
+            (int(time.time()) - 86400, int(time.time()) - 3600, 82800),
+            (0, 0, 0), (0, 0, 0), (0, 0, 0), (0, 0, 0),
+        ],
+        calibration_constants=(0.5, 0.125, 0.00001),
+        calibration_version=1702500000,
     )
     mem = {"blob": pack_record(demo_record, with_crc=True)}
 
@@ -587,4 +583,3 @@ def _demo():
 
 if __name__ == "__main__":
     _demo()
-
