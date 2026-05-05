@@ -1,3 +1,3 @@
 [submodule "xDOS-versions"]
 	path = xDOS-versions
-	url = git@github.com:UniversalScientificTechnologies/xDOS-versions.git
+	url = https://github.com/UniversalScientificTechnologies/xDOS-versions.git
