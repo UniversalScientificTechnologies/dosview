@@ -1,13 +1,30 @@
 import csv
+import importlib.util
 import json
+import sys
+import types
+from pathlib import Path
 
-from dosview.calibration_widget import (
-    CALIBRATION_CSV_METADATA_KEY,
-    CalibrationTab,
-    make_project_relative_path,
-    resolve_project_path,
-    sanitize_plot_range,
+ROOT = Path(__file__).resolve().parent.parent
+PACKAGE = types.ModuleType("dosview")
+PACKAGE.__path__ = [str(ROOT / "dosview")]
+sys.modules.setdefault("dosview", PACKAGE)
+
+CALIBRATION_WIDGET_PATH = ROOT / "dosview" / "calibration_widget.py"
+spec = importlib.util.spec_from_file_location(
+    "dosview.calibration_widget",
+    CALIBRATION_WIDGET_PATH,
 )
+calibration_widget = importlib.util.module_from_spec(spec)
+assert spec.loader is not None
+sys.modules["dosview.calibration_widget"] = calibration_widget
+spec.loader.exec_module(calibration_widget)
+
+CALIBRATION_CSV_METADATA_KEY = calibration_widget.CALIBRATION_CSV_METADATA_KEY
+CalibrationTab = calibration_widget.CalibrationTab
+make_project_relative_path = calibration_widget.make_project_relative_path
+resolve_project_path = calibration_widget.resolve_project_path
+sanitize_plot_range = calibration_widget.sanitize_plot_range
 
 
 def test_calibration_csv_metadata_is_loaded(tmp_path):
