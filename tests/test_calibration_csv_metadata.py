@@ -6,6 +6,7 @@ from dosview.calibration_widget import (
     CalibrationTab,
     make_project_relative_path,
     resolve_project_path,
+    sanitize_plot_range,
 )
 
 
@@ -54,3 +55,12 @@ def test_project_paths_are_relative_to_calib_file(tmp_path):
 
     assert stored_path == "spectra/source.csv"
     assert resolve_project_path(stored_path, str(project_path)) == str(csv_path)
+
+
+def test_plot_range_is_sanitized_for_project_file():
+    assert sanitize_plot_range({"x": [200, 100], "y": [0.8, 0.1]}) == {
+        "x": [100.0, 200.0],
+        "y": [0.1, 0.8],
+    }
+    assert sanitize_plot_range({"x": [1, 1], "y": [0, 1]}) is None
+    assert sanitize_plot_range({"x": [1, "bad"], "y": [0, 1]}) is None

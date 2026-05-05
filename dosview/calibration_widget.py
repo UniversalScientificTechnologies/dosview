@@ -124,6 +124,27 @@ def resolve_project_path(file_path, project_path):
     return os.path.abspath(os.path.join(project_dir, file_path))
 
 
+def sanitize_plot_range(plot_range):
+    if not isinstance(plot_range, dict):
+        return None
+    try:
+        x_min = float(plot_range["x"][0])
+        x_max = float(plot_range["x"][1])
+        y_min = float(plot_range["y"][0])
+        y_max = float(plot_range["y"][1])
+    except (KeyError, TypeError, ValueError, IndexError):
+        return None
+    values = (x_min, x_max, y_min, y_max)
+    if not all(math.isfinite(value) for value in values):
+        return None
+    if x_min == x_max or y_min == y_max:
+        return None
+    return {
+        "x": [min(x_min, x_max), max(x_min, x_max)],
+        "y": [min(y_min, y_max), max(y_min, y_max)],
+    }
+
+
 class EnergyAxisItem(pg.AxisItem):
     """Custom axis item for displaying energy values computed from channels."""
     
@@ -155,6 +176,8 @@ class CalibrationTab(QWidget):
         self.energy_config_key = "calibration/selected_energies"
         self.plot_legend = None
         self.legend_formula_item = None
+        self._pending_plot_range = None
+        self._plot_range_initialized = False
         self._suppress_log_item_changed = False
         self._suppress_energy_item_changed = False
         self._suppress_channel_energy_item_changed = False
@@ -320,9 +343,9 @@ class CalibrationTab(QWidget):
     def add_csv_logs(self):
         file_paths, _ = QFileDialog.getOpenFileNames(
             self,
-            "Select calibration spectrum/log files",
+            "Select spectrum CSV files",
             "",
-            "Spectrum/log files (*.csv *.TXT *.txt *.npz);;CSV files (*.csv);;Log files (*.TXT *.txt);;Saved data (*.npz);;All files (*)"
+            "Spectrum CSV files (*.csv);;All files (*)"
         )
         if not file_paths:
             return
@@ -785,6 +808,11 @@ class CalibrationTab(QWidget):
 
     def collect_project_data(self, project_path=None):
         logs, environment, device = self.collect_log_metadata(project_path=project_path)
+        view_range = self.plot_widget.plotItem.vb.viewRange()
+        plot_range = sanitize_plot_range({
+            "x": view_range[0],
+            "y": view_range[1],
+        })
 
         channel_energy = []
         for row in range(self.channel_energy_table.rowCount()):
@@ -819,6 +847,7 @@ class CalibrationTab(QWidget):
                 "slope": self.slope_spin.value(),
                 "offset": self.offset_spin.value(),
             },
+            "plot_range": plot_range,
             "log_scale": self.log_scale_checkbox.isChecked(),
         }
 
@@ -840,6 +869,7 @@ class CalibrationTab(QWidget):
         self.log_data = {}
         self.channel_energy_lines = []
         self.energy_lines = []
+        self._plot_range_initialized = False
 
         missing_logs = []
         for entry in data.get("logs", []):
@@ -890,6 +920,7 @@ class CalibrationTab(QWidget):
         self.slope_spin.setValue(float(constants.get("slope", self.slope_spin.value())))
         self.offset_spin.setValue(float(constants.get("offset", self.offset_spin.value())))
         self.log_scale_checkbox.setChecked(bool(data.get("log_scale", False)))
+        self._pending_plot_range = sanitize_plot_range(data.get("plot_range"))
 
         self.save_energy_config()
         self.sync_channel_energy_lines()
@@ -939,6 +970,16 @@ class CalibrationTab(QWidget):
         self.apply_project_data(payload, project_path=path)
 
     def update_plot(self):
+        current_view_range = self.plot_widget.plotItem.vb.viewRange()
+        if self._pending_plot_range is not None:
+            restore_range = self._pending_plot_range
+        elif self._plot_range_initialized:
+            restore_range = sanitize_plot_range({
+                "x": current_view_range[0],
+                "y": current_view_range[1],
+            })
+        else:
+            restore_range = None
         plot_item = self.plot_widget.plotItem
         plot_item.clear()
         self.plot_widget.showGrid(x=True, y=True, alpha=0.25)
@@ -993,6 +1034,11 @@ class CalibrationTab(QWidget):
         self.sync_channel_energy_lines()
         self.update_energy_lines()
         self.update_line_label_positions()
+        if restore_range is not None:
+            self.plot_widget.setXRange(restore_range["x"][0], restore_range["x"][1], padding=0)
+            self.plot_widget.setYRange(restore_range["y"][0], restore_range["y"][1], padding=0)
+        self._plot_range_initialized = bool(active_rows)
+        self._pending_plot_range = None
 
     def update_energy_lines(self):
         for line in self.energy_lines:
