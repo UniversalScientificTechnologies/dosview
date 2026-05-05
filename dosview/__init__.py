@@ -1,5 +1,6 @@
 import sys
 import argparse
+import json
 
 from PyQt5 import QtNetwork
 from PyQt5.QtNetwork import QLocalSocket, QLocalServer
@@ -28,7 +29,12 @@ import serial.tools.list_ports
 from .version import __version__
 from pyqtgraph import ImageView
 
-from .calibration_widget import CalibrationTab
+from .calibration_widget import (
+    CALIBRATION_CSV_METADATA_KEY,
+    CalibrationTab,
+    summarize_device,
+    summarize_environment,
+)
 from .parsers import (
     BaseLogParser,
     Airdos04CLogParser,
@@ -1224,8 +1230,20 @@ class PlotTab(QWidget):
             path += ".csv"
         import csv
         hist = self.data[2]
+        metadata = self.data[3] if len(self.data) > 3 and isinstance(self.data[3], dict) else {}
+        telemetry = self.data[4] if len(self.data) > 4 and isinstance(self.data[4], dict) else {}
+        calibration_metadata = {
+            "version": 1,
+            "environment": summarize_environment(telemetry),
+            "device": summarize_device(metadata),
+            "source_metadata": metadata,
+        }
         with open(path, "w", newline="") as f:
             writer = csv.writer(f)
+            writer.writerow([
+                CALIBRATION_CSV_METADATA_KEY,
+                json.dumps(calibration_metadata, ensure_ascii=True, allow_nan=True),
+            ])
             writer.writerow(["channel", "counts"])
             for ch, cnt in enumerate(hist):
                 writer.writerow([ch, int(cnt)])

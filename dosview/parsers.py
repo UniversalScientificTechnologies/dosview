@@ -79,6 +79,20 @@ class AirdosV2LogParser(BaseLogParser):
                             "hw-sn": parts[6].strip(),
                         }
                         metadata["log_runs_count"] += 1
+                    case "$DIG":
+                        metadata["log_device_info"]["DIG"] = {
+                            "type": parts[0],
+                            "module-type": parts[1] if len(parts) > 1 else "",
+                            "serial": parts[2].strip() if len(parts) > 2 else "",
+                            "configuration": parts[3].strip() if len(parts) > 3 else "",
+                        }
+                    case "$ADC":
+                        metadata["log_device_info"]["ADC"] = {
+                            "type": parts[0],
+                            "module-type": parts[1] if len(parts) > 1 else "",
+                            "serial": parts[2].strip() if len(parts) > 2 else "",
+                            "configuration": parts[3].strip() if len(parts) > 3 else "",
+                        }
                     case "$START":
                         inside_run = True
                         current_hist = np.zeros_like(hist)
@@ -209,6 +223,20 @@ class OldLogParser(BaseLogParser):
                             "hw-sn": parts[6].strip(),
                         }
                         metadata["log_runs_count"] += 1
+                    case "$DIG":
+                        metadata["log_device_info"]["DIG"] = {
+                            "type": parts[0],
+                            "module-type": parts[1] if len(parts) > 1 else "",
+                            "serial": parts[2].strip() if len(parts) > 2 else "",
+                            "configuration": parts[3].strip() if len(parts) > 3 else "",
+                        }
+                    case "$ADC":
+                        metadata["log_device_info"]["ADC"] = {
+                            "type": parts[0],
+                            "module-type": parts[1] if len(parts) > 1 else "",
+                            "serial": parts[2].strip() if len(parts) > 2 else "",
+                            "configuration": parts[3].strip() if len(parts) > 3 else "",
+                        }
                     case "$AIRDOS":
                         metadata["log_device_info"]["AIRDOS"] = {
                             "type": parts[0],

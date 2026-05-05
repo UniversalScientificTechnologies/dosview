@@ -11,7 +11,9 @@ from __future__ import annotations
 
 import csv
 import json
+import math
 import os
+import re
 from typing import Tuple
 
 import numpy as np
@@ -24,6 +26,87 @@ from PyQt5.QtWidgets import (
     QFormLayout, QDoubleSpinBox, QCheckBox, QLabel, QFileDialog,
     QMessageBox
 )
+
+from .eeprom_schema import DeviceType, KNOWN_DEVICES_BY_NAME
+from .parsers import parse_file
+
+
+CALIBRATION_CSV_METADATA_KEY = "# dosview_calibration_metadata"
+
+
+def instrument_metadata(model_name):
+    full_name = str(model_name or "").strip()
+    known = KNOWN_DEVICES_BY_NAME.get(full_name)
+    if known is not None:
+        return {
+            "model": known.full_name,
+            "device_type": known.device_type.name,
+            "device_type_value": int(known.device_type),
+            "device_version": known.device_version,
+            "hardware_revision": known.hardware_revision,
+        }
+
+    match = re.match(r"([A-Za-z]+)(\d+)?([A-Za-z]?)$", full_name)
+    family = match.group(1).upper() if match else ""
+    try:
+        device_type = DeviceType[family] if family else DeviceType.UNKNOWN
+    except KeyError:
+        device_type = DeviceType.UNKNOWN
+    return {
+        "model": full_name or "UNKNOWN",
+        "device_type": device_type.name,
+        "device_type_value": int(device_type),
+        "device_version": int(match.group(2)) if match and match.group(2) else None,
+        "hardware_revision": match.group(3).upper() if match and match.group(3) else None,
+    }
+
+
+def summarize_environment(telemetry):
+    def _mean_or_nan(*keys):
+        values = []
+        for key in keys:
+            item = telemetry.get(key) if telemetry else None
+            if not item:
+                continue
+            _, series = item
+            arr = np.asarray(series, dtype=float)
+            arr = arr[np.isfinite(arr)]
+            if arr.size:
+                values.extend(arr.tolist())
+        return float(np.mean(values)) if values else math.nan
+
+    return {
+        "temperature_celsius": _mean_or_nan("temperature_0", "temperature_1", "temperature_2"),
+        "relative_humidity_percent": _mean_or_nan("humidity_0", "humidity_1"),
+        "pressure_hpa": _mean_or_nan("pressure_3"),
+    }
+
+
+def summarize_device(metadata):
+    metadata = metadata if isinstance(metadata, dict) else {}
+    info = metadata.get("log_device_info", {})
+    dos = info.get("DOS", {})
+    adc = info.get("ADC", {})
+    dig = info.get("DIG", {})
+    analog_serial = adc.get("serial") or dos.get("hw-sn") or ""
+    return {
+        "instrument": instrument_metadata(dos.get("hw-model") or metadata.get("log_info", {}).get("detector_type")),
+        "analog_module": {
+            "type": adc.get("module-type", ""),
+            "serial_number": analog_serial,
+            "configuration": adc.get("configuration", ""),
+        },
+        "digital_module": {
+            "type": dig.get("module-type", ""),
+            "serial_number": dig.get("serial", ""),
+            "configuration": dig.get("configuration", ""),
+        },
+        "firmware": {
+            "version": dos.get("fw-version", ""),
+            "commit": dos.get("fw-commit", ""),
+            "build_info": dos.get("fw-build_info", ""),
+        },
+    }
 
 
 class EnergyAxisItem(pg.AxisItem):
@@ -82,7 +165,7 @@ class CalibrationTab(QWidget):
         logs_layout.addWidget(self.log_table)
 
         logs_buttons = QHBoxLayout()
-        add_log_button = QPushButton("Add CSV")
+        add_log_button = QPushButton("Add spectrum")
         add_log_button.clicked.connect(self.add_csv_logs)
         remove_log_button = QPushButton("Remove")
         remove_log_button.clicked.connect(self.remove_selected_logs)
@@ -222,9 +305,9 @@ class CalibrationTab(QWidget):
     def add_csv_logs(self):
         file_paths, _ = QFileDialog.getOpenFileNames(
             self,
-            "Select calibration CSV files",
+            "Select calibration spectrum/log files",
             "",
-            "CSV files (*.csv);;All files (*)"
+            "Spectrum/log files (*.csv *.TXT *.txt *.npz);;CSV files (*.csv);;Log files (*.TXT *.txt);;Saved data (*.npz);;All files (*)"
         )
         if not file_paths:
             return
@@ -232,11 +315,11 @@ class CalibrationTab(QWidget):
             if file_path in self.log_data:
                 continue
             try:
-                channels, counts = self.load_csv_counts(file_path)
+                spectrum_data = self.load_spectrum_data(file_path)
             except Exception as exc:
-                QMessageBox.warning(self, "CSV load error", f"Failed to load {file_path}: {exc}")
+                QMessageBox.warning(self, "Spectrum load error", f"Failed to load {file_path}: {exc}")
                 continue
-            self.log_data[file_path] = {"channels": channels, "counts": counts}
+            self.log_data[file_path] = spectrum_data
             self.add_log_row(file_path)
         self.update_plot()
 
@@ -285,12 +368,21 @@ class CalibrationTab(QWidget):
             self._suppress_log_item_changed = False
         self.update_plot()
 
-    def load_csv_counts(self, file_path):
+    def load_csv_spectrum_data(self, file_path):
         channels = []
         counts = []
+        csv_metadata = {}
         with open(file_path, "r", newline="") as handle:
             reader = csv.reader(handle)
             for row in reader:
+                if row and row[0].strip() == CALIBRATION_CSV_METADATA_KEY and len(row) >= 2:
+                    try:
+                        loaded = json.loads(row[1])
+                    except json.JSONDecodeError:
+                        loaded = {}
+                    if isinstance(loaded, dict):
+                        csv_metadata = loaded
+                    continue
                 if len(row) < 2:
                     continue
                 try:
@@ -302,7 +394,92 @@ class CalibrationTab(QWidget):
                 counts.append(count)
         if not channels:
             raise ValueError("No numeric channel/count data found")
-        return np.array(channels), np.array(counts)
+        return {
+            "channels": np.array(channels),
+            "counts": np.array(counts),
+            "metadata": csv_metadata.get("source_metadata", {}),
+            "telemetry": {},
+            "source_format": "csv",
+            "environment": csv_metadata.get("environment"),
+            "device": csv_metadata.get("device"),
+            "csv_metadata": csv_metadata,
+        }
+
+    def load_csv_counts(self, file_path):
+        data = self.load_csv_spectrum_data(file_path)
+        return data["channels"], data["counts"]
+
+    def load_spectrum_data(self, file_path):
+        try:
+            parsed = parse_file(file_path)
+        except Exception:
+            return self.load_csv_spectrum_data(file_path)
+
+        hist = np.asarray(parsed[2], dtype=float)
+        metadata = parsed[3] if len(parsed) > 3 and isinstance(parsed[3], dict) else {}
+        telemetry = parsed[4] if len(parsed) > 4 and isinstance(parsed[4], dict) else {}
+        return {
+            "channels": np.arange(hist.shape[0], dtype=float),
+            "counts": hist,
+            "metadata": metadata,
+            "telemetry": telemetry,
+            "source_format": "parsed_log",
+            "environment": summarize_environment(telemetry),
+            "device": summarize_device(metadata),
+        }
+
+    def summarize_environment(self, telemetry):
+        return summarize_environment(telemetry)
+
+    def summarize_device(self, metadata):
+        return summarize_device(metadata)
+
+    def collect_log_metadata(self):
+        logs = []
+        env_values = []
+        devices = []
+        for row in range(self.log_table.rowCount()):
+            log_item = self.log_table.item(row, 0)
+            label_item = self.log_table.item(row, 1)
+            if log_item is None:
+                continue
+            file_path = log_item.data(Qt.UserRole)
+            data = self.log_data.get(file_path, {})
+            telemetry = data.get("telemetry", {})
+            metadata = data.get("metadata", {})
+            environment = data.get("environment") or self.summarize_environment(telemetry)
+            device = data.get("device") or self.summarize_device(metadata)
+            checked = log_item.checkState() == Qt.Checked
+            if checked:
+                env_values.append(environment)
+                devices.append(device)
+            logs.append({
+                "path": file_path,
+                "label": label_item.text().strip() if label_item else "",
+                "checked": checked,
+                "source_format": data.get("source_format", "unknown"),
+                "environment": environment,
+                "device": device,
+                "source_metadata": metadata,
+            })
+        return logs, self.merge_environment(env_values), self.merge_devices(devices)
+
+    def merge_environment(self, environments):
+        def _mean_key(key):
+            values = [env.get(key) for env in environments]
+            values = [float(v) for v in values if v is not None and math.isfinite(float(v))]
+            return float(np.mean(values)) if values else math.nan
+
+        return {
+            "temperature_celsius": _mean_key("temperature_celsius"),
+            "relative_humidity_percent": _mean_key("relative_humidity_percent"),
+            "pressure_hpa": _mean_key("pressure_hpa"),
+        }
+
+    def merge_devices(self, devices):
+        if not devices:
+            return self.summarize_device({})
+        return devices[0]
 
     def add_empty_calibration_point(self):
         row = self.channel_energy_table.rowCount()
@@ -592,17 +769,7 @@ class CalibrationTab(QWidget):
         self.update_line_label_positions()
 
     def collect_project_data(self):
-        logs = []
-        for row in range(self.log_table.rowCount()):
-            log_item = self.log_table.item(row, 0)
-            label_item = self.log_table.item(row, 1)
-            if log_item is None:
-                continue
-            logs.append({
-                "path": log_item.data(Qt.UserRole),
-                "label": label_item.text().strip() if label_item else "",
-                "checked": log_item.checkState() == Qt.Checked,
-            })
+        logs, environment, device = self.collect_log_metadata()
 
         channel_energy = []
         for row in range(self.channel_energy_table.rowCount()):
@@ -626,8 +793,10 @@ class CalibrationTab(QWidget):
             })
 
         return {
-            "version": 1,
+            "version": 2,
             "logs": logs,
+            "calibration_environment": environment,
+            "calibration_device": device,
             "channel_energy": channel_energy,
             "selected_energies": selected_energies,
             "constants": {
@@ -662,11 +831,11 @@ class CalibrationTab(QWidget):
             if not file_path:
                 continue
             try:
-                channels, counts = self.load_csv_counts(file_path)
+                spectrum_data = self.load_spectrum_data(file_path)
             except Exception:
                 missing_logs.append(file_path)
                 continue
-            self.log_data[file_path] = {"channels": channels, "counts": counts}
+            self.log_data[file_path] = spectrum_data
             self.add_log_row(file_path)
             row = self.log_table.rowCount() - 1
             log_item = self.log_table.item(row, 0)
