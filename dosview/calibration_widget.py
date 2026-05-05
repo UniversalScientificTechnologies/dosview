@@ -109,6 +109,21 @@ def summarize_device(metadata):
     }
 
 
+def make_project_relative_path(file_path, project_path):
+    if not file_path or not project_path:
+        return file_path
+    project_dir = os.path.dirname(os.path.abspath(project_path))
+    abs_file_path = os.path.abspath(file_path)
+    return os.path.relpath(abs_file_path, project_dir)
+
+
+def resolve_project_path(file_path, project_path):
+    if not file_path or not project_path or os.path.isabs(file_path):
+        return file_path
+    project_dir = os.path.dirname(os.path.abspath(project_path))
+    return os.path.abspath(os.path.join(project_dir, file_path))
+
+
 class EnergyAxisItem(pg.AxisItem):
     """Custom axis item for displaying energy values computed from channels."""
     
@@ -434,7 +449,7 @@ class CalibrationTab(QWidget):
     def summarize_device(self, metadata):
         return summarize_device(metadata)
 
-    def collect_log_metadata(self):
+    def collect_log_metadata(self, project_path=None):
         logs = []
         env_values = []
         devices = []
@@ -454,7 +469,7 @@ class CalibrationTab(QWidget):
                 env_values.append(environment)
                 devices.append(device)
             logs.append({
-                "path": file_path,
+                "path": make_project_relative_path(file_path, project_path),
                 "label": label_item.text().strip() if label_item else "",
                 "checked": checked,
                 "source_format": data.get("source_format", "unknown"),
@@ -768,8 +783,8 @@ class CalibrationTab(QWidget):
         self.sync_channel_energy_lines()
         self.update_line_label_positions()
 
-    def collect_project_data(self):
-        logs, environment, device = self.collect_log_metadata()
+    def collect_project_data(self, project_path=None):
+        logs, environment, device = self.collect_log_metadata(project_path=project_path)
 
         channel_energy = []
         for row in range(self.channel_energy_table.rowCount()):
@@ -793,7 +808,8 @@ class CalibrationTab(QWidget):
             })
 
         return {
-            "version": 2,
+            "version": 3,
+            "path_base": "project_directory",
             "logs": logs,
             "calibration_environment": environment,
             "calibration_device": device,
@@ -806,7 +822,7 @@ class CalibrationTab(QWidget):
             "log_scale": self.log_scale_checkbox.isChecked(),
         }
 
-    def apply_project_data(self, data):
+    def apply_project_data(self, data, project_path=None):
         if not isinstance(data, dict):
             QMessageBox.warning(self, "Project load error", "Project file has invalid format.")
             return
@@ -827,13 +843,14 @@ class CalibrationTab(QWidget):
 
         missing_logs = []
         for entry in data.get("logs", []):
-            file_path = entry.get("path")
-            if not file_path:
+            stored_path = entry.get("path")
+            if not stored_path:
                 continue
+            file_path = resolve_project_path(stored_path, project_path)
             try:
                 spectrum_data = self.load_spectrum_data(file_path)
             except Exception:
-                missing_logs.append(file_path)
+                missing_logs.append(stored_path)
                 continue
             self.log_data[file_path] = spectrum_data
             self.add_log_row(file_path)
@@ -896,7 +913,7 @@ class CalibrationTab(QWidget):
             return
         if not file_path.endswith(".dosview_calib"):
             file_path = f"{file_path}.dosview_calib"
-        payload = self.collect_project_data()
+        payload = self.collect_project_data(project_path=file_path)
         try:
             with open(file_path, "w", encoding="utf-8") as handle:
                 json.dump(payload, handle, indent=2, ensure_ascii=True)
@@ -919,7 +936,7 @@ class CalibrationTab(QWidget):
         except Exception as exc:
             QMessageBox.warning(self, "Load error", f"Failed to load project: {exc}")
             return
-        self.apply_project_data(payload)
+        self.apply_project_data(payload, project_path=path)
 
     def update_plot(self):
         plot_item = self.plot_widget.plotItem
