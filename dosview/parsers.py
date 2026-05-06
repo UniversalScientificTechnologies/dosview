@@ -35,7 +35,7 @@ class AirdosV2LogParser(BaseLogParser):
     @staticmethod
     def detect(file_path: str | Path) -> bool:
         has_dos = False
-        with open(file_path, "r") as f:
+        with open(file_path, "r", encoding="ascii", errors="replace") as f:
             for line in f:
                 if line.startswith("$DOS"):
                     has_dos = True
@@ -48,6 +48,27 @@ class AirdosV2LogParser(BaseLogParser):
                     return True
         return False
 
+    @staticmethod
+    def _find_max_channel(file_path: str) -> int:
+        """Quick pre-scan to find the highest channel index used in $E and $STOP records."""
+        max_ch = 0
+        with open(file_path, "r", encoding="ascii", errors="replace") as f:
+            for line in f:
+                if line.startswith("$E,"):
+                    comma2 = line.index(",", 3) if "," in line[3:] else -1
+                    if comma2 > 0:
+                        try:
+                            ch = int(line[comma2 + 1:].split(",")[0])
+                            if ch > max_ch:
+                                max_ch = ch
+                        except ValueError:
+                            pass
+                elif line.startswith("$STOP,"):
+                    n_bins = line.count(",") - 4  # parts[5:] count
+                    if n_bins - 1 > max_ch:
+                        max_ch = n_bins - 1
+        return max_ch
+
     def parse(self):
         start_time = time.time()
         print("AIRDOS v2 parser start")
@@ -56,7 +77,8 @@ class AirdosV2LogParser(BaseLogParser):
             "log_device_info": {},
             "log_info": {},
         }
-        hist = np.zeros(65536, dtype=int)
+        n_channels = max(self._find_max_channel(self.file_path) + 1, 256)
+        hist = np.zeros(n_channels, dtype=np.int32)
         total_counts = 0
         sums: List[int] = []
         time_axis: List[float] = []
@@ -67,8 +89,9 @@ class AirdosV2LogParser(BaseLogParser):
         device_type = "unknown"
         env_records: List[Tuple[float, ...]] = []
         batt_records: List[Tuple[float, ...]] = []
+        rtc_unix_offset: float | None = None
 
-        with open(self.file_path, "r") as file:
+        with open(self.file_path, "r", encoding="ascii", errors="replace") as file:
             for line in file:
                 parts = line.strip().split(",")
                 match parts[0]:
@@ -138,6 +161,14 @@ class AirdosV2LogParser(BaseLogParser):
                                 ))
                             except ValueError:
                                 pass
+                    case "$TIME":
+                        # $TIME,rtc_counter,rtc_unix_offset,unix_timestamp,...
+                        # rtc_unix_offset = unix_timestamp - rtc_counter
+                        if len(parts) >= 3 and rtc_unix_offset is None:
+                            try:
+                                rtc_unix_offset = float(parts[2])
+                            except ValueError:
+                                pass
                     case "$BATT":
                         # $BATT,count,tm.tm_s100,voltage_mV,current_mA,remaining_mAh,full_mAh,temp_C
                         if len(parts) >= 8:
@@ -155,11 +186,19 @@ class AirdosV2LogParser(BaseLogParser):
                     case _:
                         continue
 
+        if rtc_unix_offset is not None:
+            time_axis = [t + rtc_unix_offset for t in time_axis]
+            env_records = [(r[0] + rtc_unix_offset,) + r[1:] for r in env_records]
+            batt_records = [(r[0] + rtc_unix_offset,) + r[1:] for r in batt_records]
+
         metadata["log_info"]["histogram_channels"] = hist.shape[0]
         metadata["log_info"]["events_total"] = int(total_counts)
         metadata["log_info"]["log_type_version"] = "2.0"
         metadata["log_info"]["log_type"] = "xDOS_SPECTRAL"
         metadata["log_info"]["detector_type"] = device_type
+        metadata["log_info"]["has_real_time"] = rtc_unix_offset is not None
+        if rtc_unix_offset is not None:
+            metadata["log_info"]["rtc_unix_offset"] = rtc_unix_offset
 
         telemetry: dict = {}
         if env_records:
@@ -192,7 +231,7 @@ class OldLogParser(BaseLogParser):
 
     @staticmethod
     def detect(file_path: str | Path) -> bool:
-        with open(file_path, "r") as f:
+        with open(file_path, "r", encoding="ascii", errors="replace") as f:
             for line in f:
                 if line.startswith("$DOS") and "AIRDOS04C" not in line:
                     return True
@@ -213,7 +252,7 @@ class OldLogParser(BaseLogParser):
         df_lines: List[Sequence[str]] = []
         df_metadata: List[Sequence[str]] = []
         unique_events: List[Tuple[float, int]] = []
-        with open(self.file_path, "r") as file:
+        with open(self.file_path, "r", encoding="ascii", errors="replace") as file:
             for line in file:
                 parts = line.strip().split(",")
                 match parts[0]:
