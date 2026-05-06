@@ -61,31 +61,70 @@ class LoadDataThread(QThread):
 
 
 
+class SmartDateAxisItem(pg.DateAxisItem):
+    """DateAxisItem that prefixes the date whenever the calendar day changes."""
+
+    def tickStrings(self, values, scale, spacing):
+        strings = super().tickStrings(values, scale, spacing)
+        if not values:
+            return strings
+        result = []
+        prev_date = None
+        for v, s in zip(values, strings):
+            dt = datetime.datetime.fromtimestamp(v, tz=datetime.timezone.utc)
+            current_date = dt.date()
+            if current_date != prev_date:
+                result.append(f"{current_date.strftime('%Y-%m-%d')}\n{s}")
+                prev_date = current_date
+            else:
+                result.append(s)
+        return result
+
+
 class PlotCanvas(pg.GraphicsLayoutWidget):
     def __init__(self, parent=None, file_path=None):
         super().__init__(parent)
         self.data = []
         self.file_path = file_path
-        self.telemetry_lines = {'temperature_0': None, 'humidity_0': None, 'temperature_1': None, 'humidity_1': None, 'temperature_2': None, 'pressure_3': None, 
+        self._real_time = False
+        self.telemetry_lines = {'temperature_0': None, 'humidity_0': None, 'temperature_1': None, 'humidity_1': None, 'temperature_2': None, 'pressure_3': None,
                                 'voltage': None, 'current': None, 'capacity_remaining': None, 'capacity_full': None, 'temperature': None}
+
+    @staticmethod
+    def _has_real_time(data) -> bool:
+        try:
+            return data[3].get("log_info", {}).get("has_real_time", False)
+        except (IndexError, AttributeError):
+            return False
+
+    def _x(self, t_seconds):
+        """Convert RTC/Unix seconds to plot x-axis units."""
+        return t_seconds if self._real_time else t_seconds / 60
 
     def plot(self, data):
         start_time = time.time()
 
         self.data = data
+        self._real_time = self._has_real_time(data)
         window_size = 20
 
         self.clear()
 
-        plot_evolution = self.addPlot(row=0, col=0)
+        if self._real_time:
+            bottom_axis = SmartDateAxisItem(orientation='bottom')
+            plot_evolution = self.addPlot(row=0, col=0, axisItems={'bottom': bottom_axis})
+        else:
+            plot_evolution = self.addPlot(row=0, col=0)
         plot_spectrum = self.addPlot(row=1, col=0)
-
 
         plot_evolution.showGrid(x=True, y=True)
         plot_evolution.setLabel("left",  "Total count per exposition", units="#")
-        plot_evolution.setLabel("bottom","Time", units="min")
+        if self._real_time:
+            plot_evolution.setLabel("bottom", "Time (UTC)")
+        else:
+            plot_evolution.setLabel("bottom", "Time", units="min")
 
-        time_axis = self.data[0]/60
+        time_axis = self._x(self.data[0])
         self._curve_evolution = plot_evolution.plot(time_axis, self.data[1],
                         symbol ='o', symbolPen ='pink', name ='Channel', pen=None)
 
@@ -124,13 +163,20 @@ class PlotCanvas(pg.GraphicsLayoutWidget):
     }
 
     def _add_telemetry_plot(self, telemetry):
-        plot_telemetry = self.addPlot(row=2, col=0)
+        if self._real_time:
+            bottom_axis = SmartDateAxisItem(orientation='bottom')
+            plot_telemetry = self.addPlot(row=2, col=0, axisItems={'bottom': bottom_axis})
+        else:
+            plot_telemetry = self.addPlot(row=2, col=0)
         plot_telemetry.showGrid(x=True, y=True)
-        plot_telemetry.setLabel("bottom", "Time", units="min")
+        if self._real_time:
+            plot_telemetry.setLabel("bottom", "Time (UTC)")
+        else:
+            plot_telemetry.setLabel("bottom", "Time", units="min")
         plot_telemetry.addLegend()
         for key, (t, vals) in telemetry.items():
             pen = pg.mkPen(color=self._telemetry_colors.get(key, (200, 200, 200)), width=2)
-            line = plot_telemetry.plot(t / 60, vals, pen=pen, name=key)
+            line = plot_telemetry.plot(self._x(t), vals, pen=pen, name=key)
             self.telemetry_lines[key] = line
         self._has_telemetry_plot = True
 
@@ -152,7 +198,7 @@ class PlotCanvas(pg.GraphicsLayoutWidget):
 
         self.data = data
         window_size = 20
-        time_axis = data[0] / 60
+        time_axis = self._x(data[0])
         sums = data[1]
 
         self._curve_evolution.setData(time_axis, sums)
@@ -166,7 +212,7 @@ class PlotCanvas(pg.GraphicsLayoutWidget):
         if has_telemetry:
             for key, (t, vals) in data[4].items():
                 if self.telemetry_lines.get(key) is not None:
-                    self.telemetry_lines[key].setData(t / 60, vals)
+                    self.telemetry_lines[key].setData(self._x(t), vals)
 
     def telemetry_toggle(self, key, value):
         if self.telemetry_lines[key] is not None:
