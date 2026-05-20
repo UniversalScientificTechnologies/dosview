@@ -71,3 +71,15 @@ def test_parse_fixture_returns_consistent_shapes(log_path):
 
     if metadata["log_info"].get("detector_type") == "AIRDOS04C":
         assert metadata["log_info"].get("histogram_channels") == hist.shape[0]
+
+
+def test_airdos_v2_parser_keeps_module_identification():
+    log_path = DATA_DIR / "DATALOG_AIRDOS04_2.0.TXT"
+    parsed = parse_file(log_path)
+    metadata = parsed[3]
+    device_info = metadata["log_device_info"]
+
+    assert device_info["ADC"]["module-type"] == "USTSIPIN03A"
+    assert device_info["ADC"]["serial"] == "0950710874100851f80aa0c0a08000b6"
+    assert device_info["DIG"]["module-type"] == "BATDATUNIT01B"
+    assert device_info["DIG"]["serial"] == "1470c00806c200949c49a000a00d009c"

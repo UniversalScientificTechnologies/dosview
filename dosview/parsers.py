@@ -34,13 +34,18 @@ class AirdosV2LogParser(BaseLogParser):
 
     @staticmethod
     def detect(file_path: str | Path) -> bool:
+        has_dos = False
         with open(file_path, "r") as f:
             for line in f:
                 if line.startswith("$DOS"):
+                    has_dos = True
                     parts = line.strip().split(",")
                     # parts[2] = fw-version; MAJOR.MINOR encodes the data format version
                     if len(parts) > 2 and parts[2].startswith("2."):
                         return True
+                if line.startswith("$START") and has_dos:
+                    # $START/$STOP record format used from fw 1.3 onward
+                    return True
         return False
 
     def parse(self):
@@ -79,6 +84,20 @@ class AirdosV2LogParser(BaseLogParser):
                             "hw-sn": parts[6].strip(),
                         }
                         metadata["log_runs_count"] += 1
+                    case "$DIG":
+                        metadata["log_device_info"]["DIG"] = {
+                            "type": parts[0],
+                            "module-type": parts[1] if len(parts) > 1 else "",
+                            "serial": parts[2].strip() if len(parts) > 2 else "",
+                            "configuration": parts[3].strip() if len(parts) > 3 else "",
+                        }
+                    case "$ADC":
+                        metadata["log_device_info"]["ADC"] = {
+                            "type": parts[0],
+                            "module-type": parts[1] if len(parts) > 1 else "",
+                            "serial": parts[2].strip() if len(parts) > 2 else "",
+                            "configuration": parts[3].strip() if len(parts) > 3 else "",
+                        }
                     case "$START":
                         inside_run = True
                         current_hist = np.zeros_like(hist)
@@ -105,17 +124,17 @@ class AirdosV2LogParser(BaseLogParser):
                         inside_run = False
                         current_hist = None
                     case "$ENV":
-                        # $ENV,count,tm.tm_s100,T1,H1,T2,H2,T_MS5611,P_MS5611
-                        if len(parts) >= 9:
+                        # $ENV,count,tm.tm_s100,T1,H1[,T2,H2,T_MS5611,P_MS5611]
+                        if len(parts) >= 5:
                             try:
                                 env_records.append((
-                                    float(parts[2]),  # time
-                                    float(parts[3]),  # T1 (SHT31 primary)
-                                    float(parts[4]),  # H1
-                                    float(parts[5]),  # T2 (SHT31 secondary)
-                                    float(parts[6]),  # H2
-                                    float(parts[7]),  # T_MS5611
-                                    float(parts[8]),  # P_MS5611
+                                    float(parts[2]),                        # time
+                                    float(parts[3]),                        # T1 (SHT31 primary)
+                                    float(parts[4]),                        # H1
+                                    float(parts[5]) if len(parts) > 5 else float("nan"),  # T2
+                                    float(parts[6]) if len(parts) > 6 else float("nan"),  # H2
+                                    float(parts[7]) if len(parts) > 7 else float("nan"),  # T_MS5611
+                                    float(parts[8]) if len(parts) > 8 else float("nan"),  # P_MS5611
                                 ))
                             except ValueError:
                                 pass
@@ -209,6 +228,20 @@ class OldLogParser(BaseLogParser):
                             "hw-sn": parts[6].strip(),
                         }
                         metadata["log_runs_count"] += 1
+                    case "$DIG":
+                        metadata["log_device_info"]["DIG"] = {
+                            "type": parts[0],
+                            "module-type": parts[1] if len(parts) > 1 else "",
+                            "serial": parts[2].strip() if len(parts) > 2 else "",
+                            "configuration": parts[3].strip() if len(parts) > 3 else "",
+                        }
+                    case "$ADC":
+                        metadata["log_device_info"]["ADC"] = {
+                            "type": parts[0],
+                            "module-type": parts[1] if len(parts) > 1 else "",
+                            "serial": parts[2].strip() if len(parts) > 2 else "",
+                            "configuration": parts[3].strip() if len(parts) > 3 else "",
+                        }
                     case "$AIRDOS":
                         metadata["log_device_info"]["AIRDOS"] = {
                             "type": parts[0],

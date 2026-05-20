@@ -1,5 +1,6 @@
 import sys
 import argparse
+import json
 
 from PyQt5 import QtNetwork
 from PyQt5.QtNetwork import QLocalSocket, QLocalServer
@@ -28,7 +29,12 @@ import serial.tools.list_ports
 from .version import __version__
 from pyqtgraph import ImageView
 
-from .calibration_widget import CalibrationTab
+from .calibration_widget import (
+    CALIBRATION_CSV_METADATA_KEY,
+    CalibrationTab,
+    summarize_device,
+    summarize_environment,
+)
 from .parsers import (
     BaseLogParser,
     Airdos04CLogParser,
@@ -459,10 +465,29 @@ class UARTReaderThread(QThread):
         spectral_records = []
         metadata = {"log_runs_count": 0, "log_device_info": {}}
         fmt = None  # 'old' or 'v2'
+        env_records = []
 
         # v2-specific inter-record state
         current_hist = None
         current_counts = 0
+
+        def _build_telemetry(env_recs):
+            if not env_recs:
+                return {}
+            ea = np.array(env_recs)
+            tel = {
+                "temperature_0": (ea[:, 0], ea[:, 1]),
+                "humidity_0":    (ea[:, 0], ea[:, 2]),
+            }
+            if ea.shape[1] > 3:
+                tel["temperature_1"] = (ea[:, 0], ea[:, 3])
+            if ea.shape[1] > 4:
+                tel["humidity_1"] = (ea[:, 0], ea[:, 4])
+            if ea.shape[1] > 5:
+                tel["temperature_2"] = (ea[:, 0], ea[:, 5])
+            if ea.shape[1] > 6:
+                tel["pressure_3"] = (ea[:, 0], ea[:, 6])
+            return tel
 
         try:
             self._ser = serial.Serial(self._port, self._baud, timeout=1)
@@ -477,6 +502,30 @@ class UARTReaderThread(QThread):
                     continue
                 parts = line.split(",")
                 msg = parts[0]
+
+                # --- Device header records (format-independent) ---
+                if msg == "$DOS" and len(parts) > 6:
+                    metadata["log_device_info"]["DOS"] = {
+                        "hw-model":    parts[1],
+                        "fw-version":  parts[2],
+                        "eeprom":      parts[3] if len(parts) > 3 else "",
+                        "fw-commit":   parts[4] if len(parts) > 4 else "",
+                        "fw-build_info": parts[5] if len(parts) > 5 else "",
+                        "hw-sn":       parts[6].strip() if len(parts) > 6 else "",
+                    }
+                    metadata["log_runs_count"] += 1
+                elif msg == "$ADC" and len(parts) >= 2:
+                    metadata["log_device_info"]["ADC"] = {
+                        "module-type":   parts[1] if len(parts) > 1 else "",
+                        "serial":        parts[2].strip() if len(parts) > 2 else "",
+                        "configuration": parts[3].strip() if len(parts) > 3 else "",
+                    }
+                elif msg == "$DIG" and len(parts) >= 2:
+                    metadata["log_device_info"]["DIG"] = {
+                        "module-type":   parts[1] if len(parts) > 1 else "",
+                        "serial":        parts[2].strip() if len(parts) > 2 else "",
+                        "configuration": parts[3].strip() if len(parts) > 3 else "",
+                    }
 
                 # --- Format detection ---
                 if fmt is None:
@@ -495,6 +544,19 @@ class UARTReaderThread(QThread):
                             "detector": parts[2] if len(parts) > 2 else "",
                             "hw-sn":    parts[3].strip() if len(parts) > 3 else "",
                         }
+                    elif msg == "$ENV" and len(parts) >= 5:
+                        try:
+                            env_records.append((
+                                float(parts[2]),
+                                float(parts[3]),
+                                float(parts[4]),
+                                float(parts[5]) if len(parts) > 5 else float("nan"),
+                                float(parts[6]) if len(parts) > 6 else float("nan"),
+                                float(parts[7]) if len(parts) > 7 else float("nan"),
+                                float(parts[8]) if len(parts) > 8 else float("nan"),
+                            ))
+                        except ValueError:
+                            pass
                     elif msg == "$HIST":
                         try:
                             t = float(parts[2])
@@ -508,22 +570,26 @@ class UARTReaderThread(QThread):
                             metadata["log_runs_count"] = len(time_axis)
                             sm = np.array(spectral_records)
                             self.dataUpdated.emit(
-                                [np.array(time_axis), np.array(sums), hist.copy(), metadata, {}, sm]
+                                [np.array(time_axis), np.array(sums), hist.copy(), metadata, _build_telemetry(env_records), sm]
                             )
                         except (ValueError, IndexError):
                             pass
 
                 # --- V2 format ---
                 elif fmt == "v2":
-                    if msg == "$DOS" and len(parts) > 6:
-                        metadata["log_device_info"]["DOS"] = {
-                            "hw-model":    parts[1],
-                            "fw-version":  parts[2],
-                            "eeprom":      parts[3] if len(parts) > 3 else "",
-                            "fw-commit":   parts[4] if len(parts) > 4 else "",
-                            "hw-sn":       parts[6].strip() if len(parts) > 6 else "",
-                        }
-                        metadata["log_runs_count"] += 1
+                    if msg == "$ENV" and len(parts) >= 5:
+                        try:
+                            env_records.append((
+                                float(parts[2]),
+                                float(parts[3]),
+                                float(parts[4]),
+                                float(parts[5]) if len(parts) > 5 else float("nan"),
+                                float(parts[6]) if len(parts) > 6 else float("nan"),
+                                float(parts[7]) if len(parts) > 7 else float("nan"),
+                                float(parts[8]) if len(parts) > 8 else float("nan"),
+                            ))
+                        except ValueError:
+                            pass
                     elif msg == "$START":
                         current_hist = np.zeros_like(hist)
                         current_counts = 0
@@ -554,7 +620,7 @@ class UARTReaderThread(QThread):
                             sums.append(int(current_hist.sum()))
                             sm = np.array(spectral_records)
                             self.dataUpdated.emit(
-                                [np.array(time_axis), np.array(sums), hist.copy(), metadata, {}, sm]
+                                [np.array(time_axis), np.array(sums), hist.copy(), metadata, _build_telemetry(env_records), sm]
                             )
                         except (ValueError, IndexError):
                             pass
@@ -1224,8 +1290,20 @@ class PlotTab(QWidget):
             path += ".csv"
         import csv
         hist = self.data[2]
+        metadata = self.data[3] if len(self.data) > 3 and isinstance(self.data[3], dict) else {}
+        telemetry = self.data[4] if len(self.data) > 4 and isinstance(self.data[4], dict) else {}
+        calibration_metadata = {
+            "version": 1,
+            "environment": summarize_environment(telemetry),
+            "device": summarize_device(metadata),
+            "source_metadata": metadata,
+        }
         with open(path, "w", newline="") as f:
             writer = csv.writer(f)
+            writer.writerow([
+                CALIBRATION_CSV_METADATA_KEY,
+                json.dumps(calibration_metadata, ensure_ascii=True, allow_nan=True),
+            ])
             writer.writerow(["channel", "counts"])
             for ch, cnt in enumerate(hist):
                 writer.writerow([ch, int(cnt)])
