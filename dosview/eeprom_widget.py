@@ -15,6 +15,7 @@ from PyQt5 import QtCore, QtGui, QtWidgets
 from .eeprom_schema import (
     DeviceType,
     EepromRecord,
+    KNOWN_DEVICES,
     TOTAL_SIZE,
     compute_crc32,
     pack_record,
@@ -47,6 +48,9 @@ class EepromManagerWidget(QtWidgets.QWidget):
         # sekce keV kalibrace (pouze detektor má kalibrační koeficienty).
         self._module_type = module_type
         self._widgets = {}
+        # Nastaveno v _select_device(), pokud obsah EEPROM neodpovídá žádnému
+        # zařízení z katalogu (xDOS_devices.yaml). Použito pro varování uživateli.
+        self._device_mismatch: Optional[str] = None
         self._build_ui()
 
     # UI construction -----------------------------------------------------
@@ -94,14 +98,22 @@ class EepromManagerWidget(QtWidgets.QWidget):
         # === Hardware ===
         form_layout.addRow(self._make_section_label("Hardware"))
 
+        # Verze a HW revize jsou kaskádové combo boxy: nabízejí pouze kombinace,
+        # které existují v katalogu (xDOS_devices.yaml). Změna typu přefiltruje
+        # dostupné verze, změna verze přefiltruje dostupné revize.
         hw_layout = QtWidgets.QHBoxLayout()
-        self._widgets["device_version"] = self._make_int_field(minv=0, maxv=255)
-        self._widgets["hardware_revision"] = self._make_int_field(minv=0, maxv=255)
+        self._widgets["device_version"] = QtWidgets.QComboBox()
+        self._widgets["hardware_revision"] = QtWidgets.QComboBox()
         hw_layout.addWidget(self._widgets["device_version"])
         hw_layout.addWidget(QtWidgets.QLabel("rev"))
         hw_layout.addWidget(self._widgets["hardware_revision"])
         hw_layout.addStretch(1)
         form_layout.addRow("Device version / HW revision:", hw_layout)
+
+        # Zapojení kaskády a počáteční naplnění nabídek pro výchozí typ.
+        self._widgets["device_type"].currentIndexChanged.connect(self._refresh_version_options)
+        self._widgets["device_version"].currentIndexChanged.connect(self._refresh_revision_options)
+        self._refresh_version_options()
 
         self._widgets["device_identifier"] = self._make_line_edit(max_length=24)
         form_layout.addRow("Device identifier (max 24 chars):", self._widgets["device_identifier"])
@@ -302,9 +314,118 @@ class EepromManagerWidget(QtWidgets.QWidget):
 
     def _make_device_type_field(self) -> QtWidgets.QComboBox:
         cb = QtWidgets.QComboBox()
-        for dt in DeviceType:
+        # Nabízíme pouze rodiny zařízení, které mají alespoň jedno zařízení
+        # v katalogu (xDOS_devices.yaml) - tedy ne UNKNOWN.
+        for dt in self._catalog_device_types():
             cb.addItem(dt.name, int(dt))
         return cb
+
+    @staticmethod
+    def _catalog_device_types() -> list:
+        """Rodiny zařízení vyskytující se v katalogu, v pořadí prvního výskytu."""
+        seen: list = []
+        for d in KNOWN_DEVICES:
+            if d.device_type not in seen:
+                seen.append(d.device_type)
+        return seen
+
+    @staticmethod
+    def _sorted_revisions(revs: list) -> list:
+        """Seřadí revize: None (žádná) první, pak písmena vzestupně."""
+        result: list = []
+        if any(r is None for r in revs):
+            result.append(None)
+        result.extend(sorted({r for r in revs if r is not None}))
+        return result
+
+    @staticmethod
+    def _revision_byte(rev) -> int:
+        """Převede revizi z katalogu (písmeno nebo None) na uložený byte."""
+        return ord(rev) if rev else 0
+
+    @staticmethod
+    def _revision_label(rev_byte: int) -> str:
+        """Čitelná podoba uloženého byte revize."""
+        if rev_byte == 0:
+            return "—"
+        if 65 <= rev_byte <= 90:
+            return chr(rev_byte)
+        return f"0x{rev_byte:02X}"
+
+    # Cascading device selection -----------------------------------------
+    def _refresh_version_options(self) -> None:
+        """Naplní nabídku verzí podle vybraného typu zařízení."""
+        dt_val = self._widgets["device_type"].currentData()
+        version_cb = self._widgets["device_version"]
+        version_cb.blockSignals(True)
+        version_cb.clear()
+        versions = sorted(
+            {d.device_version for d in KNOWN_DEVICES if int(d.device_type) == dt_val}
+        )
+        for v in versions:
+            version_cb.addItem(f"{int(v):02d}", int(v))
+        version_cb.blockSignals(False)
+        self._refresh_revision_options()
+
+    def _refresh_revision_options(self) -> None:
+        """Naplní nabídku revizí podle vybraného typu a verze."""
+        dt_val = self._widgets["device_type"].currentData()
+        ver = self._widgets["device_version"].currentData()
+        rev_cb = self._widgets["hardware_revision"]
+        rev_cb.blockSignals(True)
+        rev_cb.clear()
+        revs = [
+            d.hardware_revision
+            for d in KNOWN_DEVICES
+            if int(d.device_type) == dt_val and d.device_version == ver
+        ]
+        for rev in self._sorted_revisions(revs):
+            rev_cb.addItem("—" if rev is None else str(rev), self._revision_byte(rev))
+        rev_cb.blockSignals(False)
+
+    def _select_device(self, device_type, device_version, hardware_revision) -> None:
+        """Nastaví kaskádové combo boxy na danou kombinaci z EEPROM.
+
+        Pokud kombinace neexistuje v katalogu, nastaví self._device_mismatch
+        na varovný text a combo boxy ponechá na nejbližší platné hodnotě -
+        uživatel tak musí vybrat platné zařízení, než ho zapíše.
+        """
+        w = self._widgets
+        self._device_mismatch = None
+        missing = []
+
+        type_idx = w["device_type"].findData(int(device_type))
+        if type_idx < 0:
+            name = device_type.name if isinstance(device_type, DeviceType) else str(device_type)
+            missing.append(f"device type {name}")
+            type_idx = 0
+        w["device_type"].blockSignals(True)
+        w["device_type"].setCurrentIndex(type_idx)
+        w["device_type"].blockSignals(False)
+        self._refresh_version_options()
+
+        ver_idx = w["device_version"].findData(int(device_version))
+        if ver_idx < 0:
+            missing.append(f"version {int(device_version)}")
+            ver_idx = 0
+        w["device_version"].blockSignals(True)
+        w["device_version"].setCurrentIndex(max(ver_idx, 0))
+        w["device_version"].blockSignals(False)
+        self._refresh_revision_options()
+
+        rev_byte = int(hardware_revision)
+        rev_idx = w["hardware_revision"].findData(rev_byte)
+        if rev_idx < 0:
+            missing.append(f"HW revision {self._revision_label(rev_byte)}")
+            rev_idx = 0
+        w["hardware_revision"].blockSignals(True)
+        w["hardware_revision"].setCurrentIndex(max(rev_idx, 0))
+        w["hardware_revision"].blockSignals(False)
+
+        if missing:
+            self._device_mismatch = (
+                "stored device not in catalog (" + ", ".join(missing) + ")"
+            )
 
     def _format_timestamp(self, ts: int) -> str:
         """Formátuje Unix timestamp na čitelný čas."""
@@ -336,13 +457,13 @@ class EepromManagerWidget(QtWidgets.QWidget):
         w = self._widgets
         w["format_version"].setValue(int(record.format_version))
 
-        idx = w["device_type"].findData(int(record.device_type))
-        if idx >= 0:
-            w["device_type"].setCurrentIndex(idx)
+        # Typ / verze / revize - kaskádové combo boxy omezené na katalog.
+        # _select_device nastaví _device_mismatch, pokud kombinace neexistuje.
+        self._select_device(
+            record.device_type, record.device_version, record.hardware_revision
+        )
 
         w["crc32"].setText(f"0x{record.crc32:08X}")
-        w["device_version"].setValue(int(record.device_version))
-        w["hardware_revision"].setValue(int(record.hardware_revision))
         w["device_identifier"].setText(record.device_identifier)
 
         w["operating_modes"].setText(f"{record.operating_modes:016b}")
@@ -406,7 +527,13 @@ class EepromManagerWidget(QtWidgets.QWidget):
                 # Současně s EEPROM obsahem vyčteme i SN z EEPROM SN čipu.
                 self._update_serial_number()
             self._populate(record)
-            self._set_status("✅ Loaded from device")
+            if self._device_mismatch:
+                self._set_status(
+                    f"⚠️ Loaded from device — {self._device_mismatch}. "
+                    "Select a valid device before writing."
+                )
+            else:
+                self._set_status("✅ Loaded from device")
         except Exception as exc:
             self._set_status(f"❌ Read error: {exc}")
 
@@ -451,9 +578,15 @@ class EepromManagerWidget(QtWidgets.QWidget):
             # RTC sync konstanty se při načítání ze souboru přeskočí -
             # zůstanou stávající hodnoty (navázané na reálný RTC zařízení).
             self._populate(record, skip_rtc_sync=True)
-            self._set_status(
-                f"✅ Loaded from file {Path(path).name} (RTC sync skipped)"
-            )
+            if self._device_mismatch:
+                self._set_status(
+                    f"⚠️ Loaded from file {Path(path).name} — {self._device_mismatch}. "
+                    "Select a valid device before writing."
+                )
+            else:
+                self._set_status(
+                    f"✅ Loaded from file {Path(path).name} (RTC sync skipped)"
+                )
         except Exception as exc:
             self._set_status(f"❌ File load error: {exc}")
 
@@ -478,8 +611,8 @@ class EepromManagerWidget(QtWidgets.QWidget):
         try:
             format_version = int(w["format_version"].value())
             device_type = DeviceType(w["device_type"].currentData())
-            device_version = int(w["device_version"].value())
-            hardware_revision = int(w["hardware_revision"].value())
+            device_version = int(w["device_version"].currentData() or 0)
+            hardware_revision = int(w["hardware_revision"].currentData() or 0)
             device_identifier = w["device_identifier"].text()
 
             operating_modes_text = w["operating_modes"].text().strip() or "0"
