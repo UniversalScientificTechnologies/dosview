@@ -936,6 +936,8 @@ class AirdosConfigTab(QWidget):
         self.setLayout(layout)
 
     def _open_eeprom_manager(self, read_addr: int, module_type: str = "detector"):
+        from .eeprom_schema import TOTAL_SIZE
+
         def _log_eeprom(kind, message, data=None, *, full=False):
             colors = {"read": "\x1b[32m", "write": "\x1b[33m", "info": "\x1b[36m"}
             prefix = f"[EEPROM][{kind.upper()}]"
@@ -954,10 +956,10 @@ class AirdosConfigTab(QWidget):
         if not self.i2c_thread or not self.i2c_thread.hw:
             # Graceful fallback: demo mode without device
             def read_device() -> bytes:
-                # Return empty 101-byte block (unprogrammed EEPROM = 0xFF)
+                # Return empty block of TOTAL_SIZE (unprogrammed EEPROM = 0xFF)
                 _log_eeprom("info", "I2C not connected; starting demo mode")
                 _log_eeprom("read", "Demo mode: returning synthetic 0xFF block", data=b'\xFF' * 16)
-                return b'\xFF' * 101
+                return b'\xFF' * TOTAL_SIZE
             def write_device(blob: bytes) -> None:
                 _log_eeprom(
                     "write", f"Demo mode: would write {len(blob)} bytes", data=bytes(blob[:16])
@@ -977,7 +979,7 @@ class AirdosConfigTab(QWidget):
             def read_device() -> bytes:
                 try:
                     hw.set_i2c_direction(to_usb=True)
-                    _log_eeprom("read", f"Reading 101 bytes from EEPROM addr=0x{read_addr:02X}")
+                    _log_eeprom("read", f"Reading {TOTAL_SIZE} bytes from EEPROM addr=0x{read_addr:02X}")
                     
                     # Debug: read serial number
                     try:
@@ -987,7 +989,7 @@ class AirdosConfigTab(QWidget):
                         print(f"Warning: Could not read EEPROM SN: {e}")
                     
                     # Read EEPROM data via Airdos04Hardware
-                    data = hw.read_eeprom(101, start_address=0, eeprom_address=read_addr)
+                    data = hw.read_eeprom(TOTAL_SIZE, start_address=0, eeprom_address=read_addr)
                     _log_eeprom(
                         "read",
                         f"Total read {len(data)} bytes; sample={list(data[:8])}",
