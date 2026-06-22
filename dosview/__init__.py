@@ -1587,9 +1587,10 @@ class App(QMainWindow):
         
         plot_tab.open_file(file_path)
         file_name = os.path.basename(file_path)
-        
-        self.tab_widget.addTab(plot_tab, f"{file_name}")
-        self.tab_widget.setCurrentIndex(self.tab_widget.count() - 1)
+
+        tab_index = self.tab_widget.addTab(plot_tab, file_name)
+        self.tab_widget.setTabToolTip(tab_index, file_path)
+        self.tab_widget.setCurrentIndex(tab_index)
         self.updateStackedWidget()
 
     
@@ -1618,9 +1619,25 @@ class App(QMainWindow):
 
     def openCalibrationTab(self, preload_path=None):
         calibration_tab = CalibrationTab()
-        self.tab_widget.addTab(calibration_tab, "Calibration")
-        self.tab_widget.setCurrentIndex(self.tab_widget.count() - 1)
+        tab_index = self.tab_widget.addTab(calibration_tab, "Calibration")
+        self.tab_widget.setCurrentIndex(tab_index)
         self.updateStackedWidget()
+
+        def _on_calibration_title_changed(full_path, idx=tab_index):
+            name = os.path.basename(full_path)
+            prefix = "*" if calibration_tab._dirty else ""
+            self.tab_widget.setTabText(idx, f"{prefix}{name}")
+            self.tab_widget.setTabToolTip(idx, full_path)
+            if self.tab_widget.currentIndex() == idx:
+                self.statusBar.showMessage(full_path)
+
+        def _on_calibration_dirty_changed(is_dirty, idx=tab_index, tab=calibration_tab):
+            name = os.path.basename(tab._project_path) if tab._project_path else "Calibration"
+            self.tab_widget.setTabText(idx, f"*{name}" if is_dirty else name)
+
+        calibration_tab.titleChanged.connect(_on_calibration_title_changed)
+        calibration_tab.dirtyChanged.connect(_on_calibration_dirty_changed)
+
         if preload_path:
             calibration_tab.load_project(path=preload_path)
 
@@ -1646,6 +1663,7 @@ class App(QMainWindow):
 
         self.tab_widget.setCurrentIndex(0)
         self.tab_widget.setTabsClosable(True)
+        self.tab_widget.setMovable(True)
         self.tab_widget.tabCloseRequested.connect(self.close_tab)
 
         bar = self.menuBar()
@@ -1656,9 +1674,15 @@ class App(QMainWindow):
         open.triggered.connect(self.open_new_file)
         file.addAction(open)
 
+        self.save_action = QAction("Save", self)
+        self.save_action.setShortcut("Ctrl+S")
+        self.save_action.triggered.connect(self.save_current_tab)
+        self.save_action.setEnabled(False)
+        file.addAction(self.save_action)
+
         self.save_as_action = QAction("Save As", self)
-        self.save_as_action.setShortcut("Ctrl+S")
-        self.save_as_action.triggered.connect(self.save_current_tab)
+        self.save_as_action.setShortcut("Ctrl+Shift+S")
+        self.save_as_action.triggered.connect(self.save_current_tab_as)
         self.save_as_action.setEnabled(False)
         file.addAction(self.save_as_action)
 
@@ -1760,12 +1784,31 @@ class App(QMainWindow):
 
     def _update_save_action(self):
         widget = self.tab_widget.currentWidget()
-        self.save_as_action.setEnabled(isinstance(widget, (PlotTab, CalibrationTab)))
+        saveable = isinstance(widget, (PlotTab, CalibrationTab))
+        self.save_action.setEnabled(saveable)
+        self.save_as_action.setEnabled(saveable)
+        if isinstance(widget, CalibrationTab) and widget._project_path:
+            self.statusBar.showMessage(widget._project_path)
+        elif isinstance(widget, PlotTab) and hasattr(widget, "file_path") and widget.file_path:
+            self.statusBar.showMessage(widget.file_path)
+        elif isinstance(widget, LivePlotTab):
+            self.statusBar.showMessage(f"Live: {widget._port}")
+        else:
+            self.statusBar.showMessage("")
 
     def save_current_tab(self):
+        """Save to existing path (no dialog if path is known)."""
         widget = self.tab_widget.currentWidget()
         if isinstance(widget, CalibrationTab):
             widget.save_project()
+        elif isinstance(widget, PlotTab):
+            widget.save_as()
+
+    def save_current_tab_as(self):
+        """Always open Save As dialog."""
+        widget = self.tab_widget.currentWidget()
+        if isinstance(widget, CalibrationTab):
+            widget.save_project_as()
         elif isinstance(widget, PlotTab):
             widget.save_as()
 

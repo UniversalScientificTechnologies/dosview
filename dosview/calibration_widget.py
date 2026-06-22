@@ -19,7 +19,7 @@ from typing import Tuple
 import numpy as np
 import pyqtgraph as pg
 from pyqtgraph.exporters import ImageExporter
-from PyQt5.QtCore import Qt, QSettings
+from PyQt5.QtCore import Qt, QSettings, pyqtSignal
 from PyQt5.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QSplitter, QGroupBox,
     QPushButton, QTableWidget, QTableWidgetItem, QAbstractItemView,
@@ -166,7 +166,10 @@ class EnergyAxisItem(pg.AxisItem):
 
 class CalibrationTab(QWidget):
     """Widget for spectrum calibration workflow."""
-    
+
+    titleChanged = pyqtSignal(str)   # emits full path after load/save
+    dirtyChanged = pyqtSignal(bool)  # emits True when unsaved changes exist
+
     def __init__(self):
         super().__init__()
         self.log_data = {}
@@ -182,8 +185,17 @@ class CalibrationTab(QWidget):
         self._suppress_energy_item_changed = False
         self._suppress_channel_energy_item_changed = False
         self._suppress_channel_line_update = False
+        self._project_path = None
+        self._dirty = False
+        self._suppress_dirty = False
         self.initUI()
         self.load_energy_config()
+
+    def _mark_dirty(self):
+        if self._suppress_dirty or self._dirty:
+            return
+        self._dirty = True
+        self.dirtyChanged.emit(True)
 
     def initUI(self):
         main_splitter = QSplitter(Qt.Horizontal)
@@ -238,11 +250,13 @@ class CalibrationTab(QWidget):
         self.slope_spin.setDecimals(8)
         self.slope_spin.setValue(1.0)
         self.slope_spin.valueChanged.connect(self.update_energy_lines)
+        self.slope_spin.valueChanged.connect(self._mark_dirty)
         self.offset_spin = QDoubleSpinBox()
         self.offset_spin.setRange(-1e9, 1e9)
         self.offset_spin.setDecimals(8)
         self.offset_spin.setValue(0.0)
         self.offset_spin.valueChanged.connect(self.update_energy_lines)
+        self.offset_spin.valueChanged.connect(self._mark_dirty)
         constants_layout.addRow("Slope a (energy/channel)", self.slope_spin)
         constants_layout.addRow("Offset b (energy)", self.offset_spin)
         estimate_button = QPushButton("Estimate calibration constants")
@@ -288,6 +302,7 @@ class CalibrationTab(QWidget):
         self.matplotlib_button.clicked.connect(self.show_matplotlib)
         self.log_scale_checkbox = QCheckBox("Log Y")
         self.log_scale_checkbox.toggled.connect(self.update_plot)
+        self.log_scale_checkbox.toggled.connect(self._mark_dirty)
         self.show_energy_checkbox = QCheckBox("Show energy")
         self.show_energy_checkbox.setChecked(True)
         self.show_energy_checkbox.toggled.connect(self.toggle_energy_axis)
@@ -360,6 +375,7 @@ class CalibrationTab(QWidget):
             self.log_data[file_path] = spectrum_data
             self.add_log_row(file_path)
         self.update_plot()
+        self._mark_dirty()
 
     def add_log_row(self, file_path):
         name = os.path.basename(file_path)
@@ -388,6 +404,7 @@ class CalibrationTab(QWidget):
                     del self.log_data[file_path]
             self.log_table.removeRow(row)
         self.update_plot()
+        self._mark_dirty()
 
     def on_log_item_changed(self, item):
         if self._suppress_log_item_changed:
@@ -405,6 +422,7 @@ class CalibrationTab(QWidget):
             item.setText(name)
             self._suppress_log_item_changed = False
         self.update_plot()
+        self._mark_dirty()
 
     def load_csv_spectrum_data(self, file_path):
         channels = []
@@ -529,6 +547,7 @@ class CalibrationTab(QWidget):
         self._suppress_channel_energy_item_changed = False
         self.channel_energy_lines.append(None)
         self.sync_channel_energy_lines()
+        self._mark_dirty()
 
     def remove_selected_calibration_points(self):
         rows = sorted({idx.row() for idx in self.channel_energy_table.selectionModel().selectedRows()}, reverse=True)
@@ -539,6 +558,7 @@ class CalibrationTab(QWidget):
                     self.plot_widget.removeItem(line)
             self.channel_energy_table.removeRow(row)
         self.update_channel_energy_line_indices()
+        self._mark_dirty()
 
     def on_channel_energy_item_changed(self, item):
         if self._suppress_channel_energy_item_changed:
@@ -567,6 +587,7 @@ class CalibrationTab(QWidget):
         self.ensure_channel_energy_line(row, channel)
         self.update_channel_energy_line_label(row)
         self.update_line_label_positions()
+        self._mark_dirty()
 
     def ensure_channel_energy_line(self, row, channel):
         if row >= len(self.channel_energy_lines):
@@ -642,6 +663,7 @@ class CalibrationTab(QWidget):
         line.setValue(channel)
         self._suppress_channel_line_update = False
         self.update_line_label_positions()
+        self._mark_dirty()
 
     def sync_channel_energy_lines(self):
         row_count = self.channel_energy_table.rowCount()
@@ -758,6 +780,7 @@ class CalibrationTab(QWidget):
         self._suppress_energy_item_changed = False
         self.save_energy_config()
         self.update_energy_lines()
+        self._mark_dirty()
 
     def remove_selected_energy_rows(self):
         rows = sorted({idx.row() for idx in self.energy_table.selectionModel().selectedRows()}, reverse=True)
@@ -765,6 +788,7 @@ class CalibrationTab(QWidget):
             self.energy_table.removeRow(row)
         self.save_energy_config()
         self.update_energy_lines()
+        self._mark_dirty()
 
     def on_energy_item_changed(self, item):
         if self._suppress_energy_item_changed:
@@ -773,6 +797,7 @@ class CalibrationTab(QWidget):
             return
         self.save_energy_config()
         self.update_energy_lines()
+        self._mark_dirty()
 
     def import_selected_energies(self):
         selection = self.energy_table.selectionModel().selectedRows()
@@ -805,6 +830,7 @@ class CalibrationTab(QWidget):
             self.channel_energy_lines.append(None)
         self.sync_channel_energy_lines()
         self.update_line_label_positions()
+        self._mark_dirty()
 
     def collect_project_data(self, project_path=None):
         logs, environment, device = self.collect_log_metadata(project_path=project_path)
@@ -856,6 +882,7 @@ class CalibrationTab(QWidget):
             QMessageBox.warning(self, "Project load error", "Project file has invalid format.")
             return
 
+        self._suppress_dirty = True
         self._suppress_log_item_changed = True
         self._suppress_energy_item_changed = True
         self._suppress_channel_energy_item_changed = True
@@ -926,6 +953,10 @@ class CalibrationTab(QWidget):
         self.sync_channel_energy_lines()
         self.update_plot()
 
+        self._suppress_dirty = False
+        self._dirty = False
+        self.dirtyChanged.emit(False)
+
         if missing_logs:
             QMessageBox.information(
                 self,
@@ -933,23 +964,41 @@ class CalibrationTab(QWidget):
                 "Some logs could not be loaded:\n" + "\n".join(missing_logs),
             )
 
-    def save_project(self):
-        file_path, _ = QFileDialog.getSaveFileName(
-            self,
-            "Save calibration project",
-            "",
-            "Calibration project (*.dosview_calib);;All files (*)"
-        )
-        if not file_path:
-            return
-        if not file_path.endswith(".dosview_calib"):
-            file_path = f"{file_path}.dosview_calib"
+    def _write_project(self, file_path):
+        """Write project to file_path; returns True on success."""
         payload = self.collect_project_data(project_path=file_path)
         try:
             with open(file_path, "w", encoding="utf-8") as handle:
                 json.dump(payload, handle, indent=2, ensure_ascii=True)
         except Exception as exc:
             QMessageBox.warning(self, "Save error", f"Failed to save project: {exc}")
+            return False
+        self._project_path = file_path
+        self._dirty = False
+        self.dirtyChanged.emit(False)
+        self.titleChanged.emit(file_path)
+        return True
+
+    def save_project(self):
+        """Save to existing path; open dialog only when no path is known yet."""
+        if self._project_path and os.path.exists(self._project_path):
+            self._write_project(self._project_path)
+            return
+        self.save_project_as()
+
+    def save_project_as(self):
+        """Always open a Save As dialog."""
+        file_path, _ = QFileDialog.getSaveFileName(
+            self,
+            "Save calibration project",
+            self._project_path or "",
+            "Calibration project (*.dosview_calib);;All files (*)"
+        )
+        if not file_path:
+            return
+        if not file_path.endswith(".dosview_calib"):
+            file_path = f"{file_path}.dosview_calib"
+        self._write_project(file_path)
 
     def load_project(self, path=None):
         if path is None:
@@ -968,6 +1017,8 @@ class CalibrationTab(QWidget):
             QMessageBox.warning(self, "Load error", f"Failed to load project: {exc}")
             return
         self.apply_project_data(payload, project_path=path)
+        self._project_path = path
+        self.titleChanged.emit(path)
 
     def update_plot(self):
         current_view_range = self.plot_widget.plotItem.vb.viewRange()
