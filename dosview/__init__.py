@@ -48,6 +48,43 @@ from .airdos04 import Airdos04Hardware, Airdos04Addresses
 from .loading_dialog import LoadingDialog, LoadingContext
 
 
+SYMLOG_LINTHRESH = 1.0
+
+
+def symlog(v, linthresh: float = SYMLOG_LINTHRESH):
+    """Symmetric-log transform: linear within +/-linthresh, log-like beyond.
+
+    Unlike a pure log scale this keeps zero and low/negative values visible,
+    which matters for count spectra full of empty channels.
+    """
+    v = np.asarray(v, dtype=float)
+    return np.sign(v) * np.log10(1.0 + np.abs(v) / linthresh)
+
+
+def symlog_inv(u, linthresh: float = SYMLOG_LINTHRESH):
+    """Inverse of :func:`symlog` — map a transformed value back to data units."""
+    u = np.asarray(u, dtype=float)
+    return np.sign(u) * linthresh * (np.power(10.0, np.abs(u)) - 1.0)
+
+
+class SymLogAxisItem(pg.AxisItem):
+    """Axis that plots symlog-transformed values but labels them in data units."""
+
+    def __init__(self, *args, linthresh: float = SYMLOG_LINTHRESH, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.linthresh = linthresh
+
+    def tickStrings(self, values, scale, spacing):
+        out = []
+        for u in values:
+            real = float(symlog_inv(u, self.linthresh))
+            if abs(real) >= 1000 or (real != 0 and abs(real) < 0.01):
+                out.append(f"{real:.0e}")
+            else:
+                out.append(f"{real:g}")
+        return out
+
+
 class LoadDataThread(QThread):
     data_loaded = pyqtSignal(list)
 
@@ -60,54 +97,249 @@ class LoadDataThread(QThread):
         self.data_loaded.emit(data)
 
 
+class RecomputeThread(QThread):
+    """Off-GUI-thread recompute of windowed spectrum / channel-filtered evolution.
+
+    Keeps the heavy numpy summation off the event loop so the spinner animates and
+    the UI stays responsive.
+    """
+    result_ready = pyqtSignal(object)
+
+    def __init__(self, matrix, time_rows=None, channel_cols=None):
+        QThread.__init__(self)
+        self.matrix = matrix
+        self.time_rows = time_rows
+        self.channel_cols = channel_cols
+
+    def run(self):
+        out = {}
+        if self.time_rows is not None:
+            lo, hi = self.time_rows
+            out['spectrum'] = self.matrix[lo:hi].sum(axis=0)
+        if self.channel_cols is not None:
+            lo, hi = self.channel_cols
+            out['evolution'] = self.matrix[:, lo:hi].sum(axis=1)
+        self.result_ready.emit(out)
+
+
 
 class PlotCanvas(pg.GraphicsLayoutWidget):
+    WINDOW_SIZE = 20
+
     def __init__(self, parent=None, file_path=None):
         super().__init__(parent)
         self.data = []
         self.file_path = file_path
-        self.telemetry_lines = {'temperature_0': None, 'humidity_0': None, 'temperature_1': None, 'humidity_1': None, 'temperature_2': None, 'pressure_3': None, 
+        self.telemetry_lines = {'temperature_0': None, 'humidity_0': None, 'temperature_1': None, 'humidity_1': None, 'temperature_2': None, 'pressure_3': None,
                                 'voltage': None, 'current': None, 'capacity_remaining': None, 'capacity_full': None, 'temperature': None}
+        # Whether the parameters/telemetry plot (row 2) is shown. Off by default —
+        # the default view is just evolution + spectrum.
+        self._param_plot_visible = False
+        self._plot_telemetry = None
+        self._has_telemetry_plot = False
+        # Guards re-entrancy between the two linked region selectors.
+        self._updating = False
+        self._evo_region = None
+        self._spec_region = None
 
     def plot(self, data):
         start_time = time.time()
 
         self.data = data
-        window_size = 20
 
         self.clear()
-
-        plot_evolution = self.addPlot(row=0, col=0)
-        plot_spectrum = self.addPlot(row=1, col=0)
-
-
-        plot_evolution.showGrid(x=True, y=True)
-        plot_evolution.setLabel("left",  "Total count per exposition", units="#")
-        plot_evolution.setLabel("bottom","Time", units="min")
-
-        time_axis = self.data[0]/60
-        self._curve_evolution = plot_evolution.plot(time_axis, self.data[1],
-                        symbol ='o', symbolPen ='pink', name ='Channel', pen=None)
-
-        pen = pg.mkPen(color="r", width=3)
-        rolling_avg = np.convolve(self.data[1], np.ones(window_size)/window_size, mode='valid')
-        self._curve_rolling_avg = plot_evolution.plot(time_axis[window_size-1:], rolling_avg, pen=pen)
-
-        ev_data = self.data[2]
-        self._curve_spectrum = plot_spectrum.plot(range(len(ev_data)), ev_data,
-                        pen="r", symbol='x', symbolPen = 'g',
-                        symbolBrush = 0.2, name = "Energy")
-        plot_spectrum.setLabel("left", "Total count per channel", units="#")
-        plot_spectrum.setLabel("bottom", "Channel", units="#")
-
-        plot_spectrum.setLogMode(x=True, y=True)
-        plot_spectrum.showGrid(x=True, y=True)
-
+        self._plot_telemetry = None
         self._has_telemetry_plot = False
+        self._evo_region = None
+        self._spec_region = None
+
+        # Raw arrays kept for index math (regions operate on data units, while the
+        # curves are drawn through the symlog transform).
+        self._time_axis_s = np.asarray(data[0], dtype=float)
+        self._time_axis_min = self._time_axis_s / 60.0
+        self._sums = np.asarray(data[1], dtype=float)
+        self._hist = np.asarray(data[2], dtype=float)
+        self._channels = np.arange(len(self._hist), dtype=float)
+        sm = data[5] if len(data) > 5 else None
+        if sm is not None and hasattr(sm, "ndim") and sm.ndim == 2 and sm.shape[0] >= 1 and sm.shape[1] > 0:
+            self._spectral_matrix = np.asarray(sm, dtype=float)
+        else:
+            self._spectral_matrix = None
+
+        self.plot_evolution = self.addPlot(row=0, col=0,
+                        axisItems={'left': SymLogAxisItem(orientation='left')})
+        self.plot_spectrum = self.addPlot(row=1, col=0,
+                        axisItems={'left': SymLogAxisItem(orientation='left'),
+                                   'bottom': SymLogAxisItem(orientation='bottom')})
+
+        self.plot_evolution.showGrid(x=True, y=True)
+        self.plot_evolution.setLabel("left",  "Total count per exposition", units="#")
+        self.plot_evolution.setLabel("bottom", "Time", units="min")
+
+        self._curve_evolution = self.plot_evolution.plot([], [],
+                        symbol='o', symbolPen='pink', name='Channel', pen=None)
+        pen = pg.mkPen(color="r", width=3)
+        self._curve_rolling_avg = self.plot_evolution.plot([], [], pen=pen)
+        self._set_evolution_curve(self._sums)
+
+        self._curve_spectrum = self.plot_spectrum.plot([], [],
+                        pen="r", symbol='x', symbolPen='g',
+                        symbolBrush=0.2, name="Energy")
+        self.plot_spectrum.setLabel("left", "Total count per channel", units="#")
+        self.plot_spectrum.setLabel("bottom", "Channel", units="#")
+        self.plot_spectrum.showGrid(x=True, y=True)
+        self._set_spectrum_curve(self._hist)
+
+        # Linked region selectors — only useful when we have a spectral matrix to
+        # recompute windowed spectra / channel-filtered evolution from.
+        if self._spectral_matrix is not None:
+            self._add_region_selectors()
+
         if len(self.data) > 4 and self.data[4]:
             self._add_telemetry_plot(self.data[4])
+            # Respect the checkbox: hide the parameters plot unless enabled.
+            self.set_param_plot_visible(self._param_plot_visible)
+
+        self._setup_hover()
 
         print("PLOT DURATION ... ", time.time()-start_time)
+
+    def _setup_hover(self):
+        """Crosshair + tooltip following the cursor over the evolution/spectrum plots."""
+        pen = pg.mkPen((150, 150, 150), width=1, style=Qt.DashLine)
+        self._hover_targets = []
+        for plot, kind in ((self.plot_evolution, 'evo'), (self.plot_spectrum, 'spec')):
+            vline = pg.InfiniteLine(angle=90, movable=False, pen=pen)
+            hline = pg.InfiniteLine(angle=0, movable=False, pen=pen)
+            label = pg.TextItem(color=(230, 230, 230), anchor=(0, 1),
+                                fill=pg.mkBrush(0, 0, 0, 160))
+            for item in (vline, hline, label):
+                item.setVisible(False)
+                item.setZValue(100)
+                plot.addItem(item, ignoreBounds=True)
+            self._hover_targets.append((plot, kind, vline, hline, label))
+        self._hover_proxy = pg.SignalProxy(
+            self.scene().sigMouseMoved, rateLimit=60, slot=self._on_mouse_moved)
+
+    def _on_mouse_moved(self, evt):
+        pos = evt[0]
+        for plot, kind, vline, hline, label in self._hover_targets:
+            if not plot.sceneBoundingRect().contains(pos):
+                vline.setVisible(False)
+                hline.setVisible(False)
+                label.setVisible(False)
+                continue
+            mp = plot.getViewBox().mapSceneToView(pos)
+            x, y = mp.x(), mp.y()
+            if kind == 'evo':
+                if not len(self._time_axis_min):
+                    continue
+                idx = int(np.argmin(np.abs(self._time_axis_min - x)))
+                t = float(self._time_axis_min[idx])
+                count = float(self._cur_sums[idx])
+                px, py = t, float(symlog(count))
+                text = f"t = {t:.2f} min\ncount = {count:.0f}"
+            else:
+                if not len(self._channels):
+                    continue
+                ch = int(np.clip(round(symlog_inv(x)), 0, len(self._channels) - 1))
+                count = float(self._cur_spectrum[ch])
+                px, py = float(symlog(ch)), float(symlog(count))
+                text = f"channel = {ch}\ncount = {count:.0f}"
+            vline.setPos(px)
+            hline.setPos(py)
+            label.setText(text)
+            label.setPos(px, py)
+            for item in (vline, hline, label):
+                item.setVisible(True)
+
+    def _set_evolution_curve(self, sums):
+        """Draw the evolution curve (and rolling average) in symlog-y."""
+        sums = np.asarray(sums, dtype=float)
+        self._cur_sums = sums  # currently displayed values (for the hover tooltip)
+        self._curve_evolution.setData(self._time_axis_min, symlog(sums))
+        window_size = self.WINDOW_SIZE
+        if len(sums) >= window_size:
+            rolling_avg = np.convolve(sums, np.ones(window_size) / window_size, mode='valid')
+            self._curve_rolling_avg.setData(self._time_axis_min[window_size - 1:], symlog(rolling_avg))
+        else:
+            self._curve_rolling_avg.setData([], [])
+
+    def _set_spectrum_curve(self, spec):
+        """Draw the spectrum curve in symlog on both axes."""
+        spec = np.asarray(spec, dtype=float)
+        self._cur_spectrum = spec  # currently displayed values (for the hover tooltip)
+        self._curve_spectrum.setData(symlog(self._channels), symlog(spec))
+
+    def _add_region_selectors(self):
+        # Both regions are hidden by default and toggled on via buttons. Recompute
+        # is manual (the Recompute button) — dragging no longer triggers anything,
+        # which keeps the UI responsive on large spectral matrices.
+        # Time window in the evolution plot (x = minutes, linear axis).
+        t_min, t_max = float(self._time_axis_min[0]), float(self._time_axis_min[-1])
+        self._evo_region = pg.LinearRegionItem(values=(t_min, t_max), orientation='vertical')
+        self._evo_region.setZValue(-10)
+        self._evo_region.setVisible(False)
+        self.plot_evolution.addItem(self._evo_region)
+
+        # Channel window in the spectrum plot (x is symlog-transformed channel).
+        c_min, c_max = float(self._channels[0]), float(self._channels[-1])
+        self._spec_region = pg.LinearRegionItem(
+            values=(float(symlog(c_min)), float(symlog(c_max))), orientation='vertical')
+        self._spec_region.setZValue(-10)
+        self._spec_region.setVisible(False)
+        self.plot_spectrum.addItem(self._spec_region)
+
+    def has_spectral_matrix(self):
+        return getattr(self, "_spectral_matrix", None) is not None
+
+    def set_time_region_active(self, active):
+        if self._evo_region is not None:
+            self._evo_region.setVisible(active)
+
+    def set_channel_region_active(self, active):
+        if self._spec_region is not None:
+            self._spec_region.setVisible(active)
+
+    def time_region_rows(self):
+        """Row range (row_lo, row_hi) selected by the evolution region, or None."""
+        if self._spectral_matrix is None or self._evo_region is None or not self._evo_region.isVisible():
+            return None
+        lo_min, hi_min = self._evo_region.getRegion()
+        row_lo = int(np.searchsorted(self._time_axis_s, lo_min * 60.0, side='left'))
+        row_hi = int(np.searchsorted(self._time_axis_s, hi_min * 60.0, side='right'))
+        if row_hi - row_lo < 1:
+            return None
+        return (row_lo, row_hi)
+
+    def channel_region_cols(self):
+        """Channel range (ch_lo, ch_hi) selected by the spectrum region, or None."""
+        if self._spectral_matrix is None or self._spec_region is None or not self._spec_region.isVisible():
+            return None
+        u_lo, u_hi = self._spec_region.getRegion()
+        n = len(self._channels)
+        ch_lo = int(np.clip(np.floor(symlog_inv(u_lo)), 0, n))
+        ch_hi = int(np.clip(np.ceil(symlog_inv(u_hi)), 0, n))
+        if ch_hi - ch_lo < 1:
+            return None
+        return (ch_lo, ch_hi)
+
+    def apply_spectrum(self, spec):
+        self._set_spectrum_curve(spec)
+
+    def apply_evolution(self, sums):
+        self._set_evolution_curve(sums)
+
+    def set_param_plot_visible(self, visible):
+        """Add/remove the parameters (telemetry) plot from the layout (row 2)."""
+        self._param_plot_visible = visible
+        if self._plot_telemetry is None:
+            return
+        in_layout = self.getItem(2, 0) is self._plot_telemetry
+        if visible and not in_layout:
+            self.addItem(self._plot_telemetry, row=2, col=0)
+        elif not visible and in_layout:
+            self.removeItem(self._plot_telemetry)
 
     _telemetry_colors = {
         "temperature_0": (220, 50, 50),
@@ -132,6 +364,7 @@ class PlotCanvas(pg.GraphicsLayoutWidget):
             pen = pg.mkPen(color=self._telemetry_colors.get(key, (200, 200, 200)), width=2)
             line = plot_telemetry.plot(t / 60, vals, pen=pen, name=key)
             self.telemetry_lines[key] = line
+        self._plot_telemetry = plot_telemetry
         self._has_telemetry_plot = True
 
     def update_data(self, data):
@@ -151,17 +384,20 @@ class PlotCanvas(pg.GraphicsLayoutWidget):
             return
 
         self.data = data
-        window_size = 20
-        time_axis = data[0] / 60
-        sums = data[1]
+        # Refresh the raw arrays the linked selectors and transforms operate on.
+        self._time_axis_s = np.asarray(data[0], dtype=float)
+        self._time_axis_min = self._time_axis_s / 60.0
+        self._sums = np.asarray(data[1], dtype=float)
+        self._hist = np.asarray(data[2], dtype=float)
+        self._channels = np.arange(len(self._hist), dtype=float)
+        sm = data[5] if len(data) > 5 else None
+        if sm is not None and hasattr(sm, "ndim") and sm.ndim == 2 and sm.shape[0] >= 1 and sm.shape[1] > 0:
+            self._spectral_matrix = np.asarray(sm, dtype=float)
+        else:
+            self._spectral_matrix = None
 
-        self._curve_evolution.setData(time_axis, sums)
-        rolling_avg = np.convolve(sums, np.ones(window_size) / window_size, mode='valid')
-        if len(rolling_avg) > 0:
-            self._curve_rolling_avg.setData(time_axis[window_size - 1:], rolling_avg)
-
-        ev_data = data[2]
-        self._curve_spectrum.setData(range(len(ev_data)), ev_data)
+        self._set_evolution_curve(self._sums)
+        self._set_spectrum_curve(self._hist)
 
         if has_telemetry:
             for key, (t, vals) in data[4].items():
@@ -1163,6 +1399,19 @@ class PlotTab(QWidget):
         self.datalines_tree.setColumnCount(1)
         self.datalines_tree.setHeaderLabels(["Units"])
 
+        # Checkbox above the parameter list: toggles the whole parameters panel
+        # (the list itself + the parameters/telemetry graph). Off by default so
+        # the default view is just evolution + spectrum.
+        self.show_params_checkbox = QCheckBox("Show parameters")
+        self.show_params_checkbox.setChecked(False)
+        self.show_params_checkbox.toggled.connect(self._on_show_params_toggled)
+        self.datalines_tree.setVisible(False)
+
+        params_panel = QWidget()
+        params_layout = QVBoxLayout(params_panel)
+        params_layout.setContentsMargins(0, 0, 0, 0)
+        params_layout.addWidget(self.show_params_checkbox)
+        params_layout.addWidget(self.datalines_tree)
 
         self.open_img_view_button = QPushButton("Spectrogram")
         self.open_img_view_button.setMaximumHeight(20)
@@ -1177,18 +1426,58 @@ class PlotTab(QWidget):
         self.export_csv_button.clicked.connect(self.export_spectrum_csv)
         self.export_csv_button.setEnabled(False)
 
+        # Region-selection controls: each checkbox reveals its LinearRegionItem;
+        # Recompute applies the active selections (threaded, with a spinner).
+        self.time_region_button = QCheckBox("Time → spectrum")
+        self.time_region_button.setMaximumHeight(20)
+        self.time_region_button.setEnabled(False)
+        self.time_region_button.toggled.connect(
+            lambda on: self.plot_canvas.set_time_region_active(on))
+
+        self.channel_region_button = QCheckBox("Channel → evolution")
+        self.channel_region_button.setMaximumHeight(20)
+        self.channel_region_button.setEnabled(False)
+        self.channel_region_button.toggled.connect(
+            lambda on: self.plot_canvas.set_channel_region_active(on))
+
+        self.recompute_button = QPushButton("Recompute")
+        self.recompute_button.setMaximumHeight(20)
+        self.recompute_button.setEnabled(False)
+        self.recompute_button.clicked.connect(self.recompute)
+
         log_view_widget = QWidget()
 
         self.left_panel = QSplitter(Qt.Vertical)
 
-        self.left_panel.addWidget(self.datalines_tree)
+        self.left_panel.addWidget(params_panel)
         self.left_panel.addWidget(self.properties_tree)
 
         vb = QHBoxLayout()
         vb.addWidget(self.open_img_view_button)
         vb.addWidget(self.upload_file_button)
         vb.addWidget(self.export_csv_button)
-        self.left_panel.setLayout(vb)
+
+        self.recompute_button.setSizePolicy(QSizePolicy.Maximum, QSizePolicy.Maximum)
+
+        region_row = QHBoxLayout()
+        region_row.addWidget(self.time_region_button)
+        region_row.addWidget(self.channel_region_button)
+        region_row.addWidget(self.recompute_button)
+        region_row.addStretch(1)
+
+        # A QSplitter does not support setLayout() directly (it silently ignores
+        # the layout), so the controls live in a real container widget added as a
+        # splitter pane.
+        controls_widget = QWidget()
+        controls_widget.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Maximum)
+        controls_layout = QVBoxLayout(controls_widget)
+        controls_layout.setContentsMargins(0, 0, 0, 0)
+        controls_layout.addLayout(vb)
+        controls_layout.addLayout(region_row)
+        self.left_panel.addWidget(controls_widget)
+        # Keep the controls pane at its natural (one-row) height in the splitter.
+        self.left_panel.setStretchFactor(self.left_panel.count() - 1, 0)
+        self.left_panel.setCollapsible(self.left_panel.count() - 1, False)
 
         self.logView_splitter = QSplitter(Qt.Horizontal)
         self.logView_splitter.addWidget(self.left_panel)
@@ -1204,14 +1493,20 @@ class PlotTab(QWidget):
         self.plot_canvas = PlotCanvas(self, file_path=self.file_path)
         self.logView_splitter.addWidget(self.plot_canvas)
 
-        self.logView_splitter.setSizes([1, 9])
-        sizes = self.logView_splitter.sizes()
-        sizes[0] = int(sizes[1] * 0.1)
-        self.logView_splitter.setSizes(sizes)
+        # Keep the sidebar as narrow as its content allows (it shrinks to the
+        # minimum size hint); the plot canvas takes all remaining width. Still
+        # draggable wider by the user.
+        self.logView_splitter.setStretchFactor(0, 0)
+        self.logView_splitter.setStretchFactor(1, 1)
+        self.logView_splitter.setSizes([1, 10000])
 
         self.start_data_loading()
 
     def start_data_loading(self):
+        # Parent to the top-level window: at startup this PlotTab isn't shown yet,
+        # so parenting to a visible window makes the spinner appear reliably.
+        self._loading_dialog = LoadingDialog(self.window(), "Loading", "Loading log file…")
+        self._loading_dialog.start()
         self.load_data_thread = LoadDataThread(self.file_path)
         self.load_data_thread.data_loaded.connect(self.on_data_loaded)
         self.load_data_thread.start()
@@ -1261,6 +1556,46 @@ class PlotTab(QWidget):
 
         self.properties_tree.expandAll()
 
+        # Apply the current checkbox state now that the telemetry plot exists.
+        self.plot_canvas.set_param_plot_visible(self.show_params_checkbox.isChecked())
+
+        # Region selection / recompute only makes sense with a spectral matrix.
+        has_matrix = self.plot_canvas.has_spectral_matrix()
+        self.time_region_button.setEnabled(has_matrix)
+        self.channel_region_button.setEnabled(has_matrix)
+        self.recompute_button.setEnabled(has_matrix)
+
+        if getattr(self, "_loading_dialog", None) is not None:
+            self._loading_dialog.stop()
+            self._loading_dialog = None
+
+    def _on_show_params_toggled(self, checked):
+        self.datalines_tree.setVisible(checked)
+        if hasattr(self, "plot_canvas") and self.plot_canvas is not None:
+            self.plot_canvas.set_param_plot_visible(checked)
+
+    def recompute(self):
+        if not hasattr(self, "plot_canvas") or not self.plot_canvas.has_spectral_matrix():
+            return
+        treq = self.plot_canvas.time_region_rows()
+        creq = self.plot_canvas.channel_region_cols()
+        if treq is None and creq is None:
+            return
+        self._recompute_dialog = LoadingDialog(self.window(), "Recomputing", "Recomputing…")
+        self._recompute_dialog.start()
+        self._recompute_thread = RecomputeThread(
+            self.plot_canvas._spectral_matrix, treq, creq)
+        self._recompute_thread.result_ready.connect(self._on_recompute_done)
+        self._recompute_thread.start()
+
+    def _on_recompute_done(self, out):
+        if 'spectrum' in out:
+            self.plot_canvas.apply_spectrum(out['spectrum'])
+        if 'evolution' in out:
+            self.plot_canvas.apply_evolution(out['evolution'])
+        if getattr(self, "_recompute_dialog", None) is not None:
+            self._recompute_dialog.stop()
+            self._recompute_dialog = None
 
     def open_spectrogram_view(self):
         if not hasattr(self, "data") or self.data is None or len(self.data) < 6:

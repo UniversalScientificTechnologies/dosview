@@ -35,7 +35,7 @@ class AirdosV2LogParser(BaseLogParser):
     @staticmethod
     def detect(file_path: str | Path) -> bool:
         has_dos = False
-        with open(file_path, "r") as f:
+        with open(file_path, "r", errors="ignore") as f:
             for line in f:
                 if line.startswith("$DOS"):
                     has_dos = True
@@ -68,7 +68,7 @@ class AirdosV2LogParser(BaseLogParser):
         env_records: List[Tuple[float, ...]] = []
         batt_records: List[Tuple[float, ...]] = []
 
-        with open(self.file_path, "r") as file:
+        with open(self.file_path, "r", errors="ignore") as file:
             for line in file:
                 parts = line.strip().split(",")
                 match parts[0]:
@@ -192,7 +192,7 @@ class OldLogParser(BaseLogParser):
 
     @staticmethod
     def detect(file_path: str | Path) -> bool:
-        with open(file_path, "r") as f:
+        with open(file_path, "r", errors="ignore") as f:
             for line in f:
                 if line.startswith("$DOS") and "AIRDOS04C" not in line:
                     return True
@@ -213,7 +213,7 @@ class OldLogParser(BaseLogParser):
         df_lines: List[Sequence[str]] = []
         df_metadata: List[Sequence[str]] = []
         unique_events: List[Tuple[float, int]] = []
-        with open(self.file_path, "r") as file:
+        with open(self.file_path, "r", errors="ignore") as file:
             for line in file:
                 parts = line.strip().split(",")
                 match parts[0]:
