@@ -1503,9 +1503,18 @@ class PlotTab(QWidget):
         self.start_data_loading()
 
     def start_data_loading(self):
-        # Parent to the top-level window: at startup this PlotTab isn't shown yet,
-        # so parenting to a visible window makes the spinner appear reliably.
-        self._loading_dialog = LoadingDialog(self.window(), "Loading", "Loading log file…")
+        # open_file() runs before this PlotTab is added to the tab widget, so
+        # self.window() would still return this (invisible, un-parented) tab and
+        # a modal dialog parented to it never paints. Defer to the event loop so
+        # the tab is mounted in the main window first, then parent to a visible
+        # top-level window so the spinner shows reliably.
+        QTimer.singleShot(0, self._start_data_loading)
+
+    def _start_data_loading(self):
+        parent = self.window()
+        if parent is self or not parent.isVisible():
+            parent = QApplication.activeWindow()
+        self._loading_dialog = LoadingDialog(parent, "Loading", "Loading log file…")
         self._loading_dialog.start()
         self.load_data_thread = LoadDataThread(self.file_path)
         self.load_data_thread.data_loaded.connect(self.on_data_loaded)
