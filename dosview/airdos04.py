@@ -512,6 +512,9 @@ class Airdos04Hardware:
     
     def disable_charging_and_poweroff(self) -> None:
         """Zakáže nabíjení a vypne napájení."""
+        import traceback
+        print("[POWEROFF] disable_charging_and_poweroff() called!")
+        traceback.print_stack()
         self.bus.write_byte_data(self.addr.charger, 0x18, 0b00011010)
     
     # =========================================================================
