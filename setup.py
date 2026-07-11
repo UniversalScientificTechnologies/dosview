@@ -43,10 +43,12 @@ setup(
     description='Dosview is a simple graphical log viewer and control interface for Universial Scientific Technologies (UST) dosimeters.', 
     long_description=long_description,
     long_description_content_type='text/markdown',
-    packages=find_packages(),
+    packages=find_packages() + ['dosview._generated'],
+    package_dir={'dosview._generated': 'xDOS-versions/generated'},
     entry_points={
         'console_scripts': [
             'dosview = dosview:main',
+            'airdos04-info = dosview.airdos04_info:main',
         ],
     },
     include_package_data=True,

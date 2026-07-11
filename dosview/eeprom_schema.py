@@ -13,12 +13,16 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import List, Tuple
 
-# Make xDOS-versions/generated importable as a package.
-_XDOS_GENERATED = Path(__file__).parent.parent / "xDOS-versions" / "generated"
-if str(_XDOS_GENERATED.parent) not in sys.path:
-    sys.path.insert(0, str(_XDOS_GENERATED.parent))
-
-from generated import DeviceType, KNOWN_DEVICES, KNOWN_DEVICES_BY_NAME  # noqa: E402
+# Prefer the packaged copy (dosview/_generated, shipped in the wheel/sdist).
+# Fall back to the xDOS-versions submodule for running from a source
+# checkout without installing.
+try:
+    from dosview._generated import DeviceType, KNOWN_DEVICES, KNOWN_DEVICES_BY_NAME
+except ModuleNotFoundError:
+    _XDOS_GENERATED = Path(__file__).parent.parent / "xDOS-versions" / "generated"
+    if str(_XDOS_GENERATED.parent) not in sys.path:
+        sys.path.insert(0, str(_XDOS_GENERATED.parent))
+    from generated import DeviceType, KNOWN_DEVICES, KNOWN_DEVICES_BY_NAME  # noqa: E402
 
 # Re-export so callers that do `from .eeprom_schema import DeviceType` still work.
 __all__ = [

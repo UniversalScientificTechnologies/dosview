@@ -37,7 +37,15 @@ dependencies = [
     "pyqt5",
     "pyqtgraph",
     "ft260",
+    "pyserial",
+    "hidapi",
 ]
+
+[tool.setuptools]
+packages = ["dosview", "dosview._generated"]
+
+[tool.setuptools.package-dir]
+"dosview._generated" = "xDOS-versions/generated"
 
 [tool.setuptools.dynamic]
 version = {attr="dosview.version.__version__"}
