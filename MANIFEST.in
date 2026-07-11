@@ -1,1 +1,1 @@
-include requirements.txt
+recursive-include xDOS-versions/generated *.py

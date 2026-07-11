@@ -57,12 +57,17 @@ pytest  # Automatically discovers tests in tests/test_parser.py
 ### Building & Distribution
 ```bash
 pip install .              # Development mode
-python setup.py build sdist  # Build source distribution
-pytest && python setup.py build sdist  # Full CI/CD flow (see .github/workflows/tests.yml)
+python -m build             # Build sdist + wheel (PEP 517, see .github/workflows/python-publish.yml)
+pytest && python -m build   # Full CI/CD flow
 ```
-- Entry point: `dosview:main()` defined in `pyproject.toml`
-- Desktop integration: `dosview.desktop` installed to `/usr/local/share/applications` post-install
-- Icon: `media/icon_ust.png` bundled via `setup.py` custom `PostInstallCommand`
+- Single source of build config: `pyproject.toml` (no `setup.py`/`requirements.txt` — removed to stop
+  dependency/packaging drift between the two)
+- Entry points: `dosview:main()` and `dosview.airdos04_info:main()` defined in `pyproject.toml`
+- The `xDOS-versions` git submodule's `generated/` code is packaged as `dosview._generated`
+  (see `[tool.setuptools]`/`[tool.setuptools.package-dir]` in `pyproject.toml`); `dosview/eeprom_schema.py`
+  falls back to importing the submodule directly when run from an unpacked source checkout
+- Desktop integration: not installed by pip. Run `tools/install_desktop_entry.sh` manually to register
+  `dosview.desktop` and `media/icon_ust.png` under `/usr/local/share/...`
 
 ### Running
 ```bash
@@ -92,7 +97,7 @@ Allows unit testing without initializing X11/display (critical for CI/CD headles
 - **New detector format?** Extend `OldLogParser.detect()` or create `NewDetectorParser` subclass
 - **New plot type?** Add to `PlotCanvas.plot()` before `self.show()` to avoid blocking
 - **New metadata?** Update `metadata` dict in parser; PlotCanvas will have access via `self.data[3]`
-- **New dependencies?** Add to `dependencies` list in `pyproject.toml` AND `requirements.txt` (both are used by CI)
+- **New dependencies?** Add to `dependencies` list in `pyproject.toml` (single source of truth for build/CI)
 
 ## Testing New Code
 

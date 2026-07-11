@@ -37,21 +37,14 @@ Dosview can be installed using several methods. Below are the instructions for e
   sudo pip3 install -e . 
 ```
 
-### From setup.py
+### Desktop menu entry (Linux, optional)
 
-> This way is not recomended
-
-1. Download the source code from the GitHub repository.
-2. Navigate to the directory containing `setup.py`.
-3. Run the following command:
-   ```
-   sudo python3 setup.py install
-   ```
-   This will install the necessary dependencies and the dosview tool.
-
-
-> This way is usefull for develop setup. oou can replace `install` with `develop`. 
-
+`pip install` does not register dosview in the desktop application menu,
+since that means writing outside the Python environment
+(`/usr/local/share/...`). To add a menu entry and icon after installing:
+```
+sudo ./tools/install_desktop_entry.sh
+```
 
 ## Usage
 To use dosview, open your command line interface and execute the following command:
