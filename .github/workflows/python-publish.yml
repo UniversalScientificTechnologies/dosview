@@ -24,14 +24,11 @@ jobs:
         python-version: '3.x'
     - name: Install dependencies
       run: |
-        sudo apt-get install python3-setuptools
         python3 -m pip install --upgrade pip
-        #pip3 install build 
-        pip3 install -r requirements.txt
+        pip3 install build
     - name: Build package
       run: |
-        sudo apt-get install python3-setuptools
-        python3 setup.py build sdist
+        python3 -m build
     - name: Publish package
       uses: pypa/gh-action-pypi-publish@27b31702a0e7fc50959f5ad993c78deac1bdfc29
       with:

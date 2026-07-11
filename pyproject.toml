@@ -50,11 +50,6 @@ packages = ["dosview", "dosview._generated"]
 [tool.setuptools.dynamic]
 version = {attr="dosview.version.__version__"}
 
-#[tool.setuptools.package-data]
-#'/usr/local/share/applications' = ['dosview.desktop']
-#'/usr/local/share/icons' = ['media/icon_ust.png']
-
-
 [project.scripts]
 dosview = "dosview:main"
 airdos04-info = "dosview.airdos04_info:main"

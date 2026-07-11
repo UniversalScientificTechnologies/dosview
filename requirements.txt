@@ -1,9 +1,0 @@
-setuptools
-matplotlib
-numpy
-pandas
-pyqt5
-pyqtgraph
-pyserial
-ft260
-hidapi
