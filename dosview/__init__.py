@@ -1,6 +1,7 @@
 import sys
 import argparse
 import json
+import logging
 
 from PyQt5 import QtNetwork
 from PyQt5.QtNetwork import QLocalSocket, QLocalServer
@@ -25,6 +26,8 @@ import numpy as np
 import os
 import serial
 import serial.tools.list_ports
+
+logger = logging.getLogger(__name__)
 
 from .version import __version__
 from pyqtgraph import ImageView
@@ -669,6 +672,66 @@ class USBStorageMonitoringThread(QThread):
         # Implement USB storage monitoring logic here
 
 
+class _GrowableArray:
+    """Amortized O(1) append-only 1D numpy buffer.
+
+    Rebuilding a numpy array from a growing Python list on every incoming
+    record costs O(n) per record (O(n^2) over a whole live session). This
+    doubles capacity instead, like list/vector growth, so appends stay cheap
+    for the whole session.
+    """
+
+    def __init__(self, dtype=float, initial_capacity=64):
+        self._data = np.zeros(max(initial_capacity, 1), dtype=dtype)
+        self._count = 0
+
+    def append(self, value):
+        if self._count == self._data.shape[0]:
+            self._data = np.concatenate([self._data, np.zeros_like(self._data)])
+        self._data[self._count] = value
+        self._count += 1
+
+    def view(self):
+        return self._data[: self._count]
+
+    def __len__(self):
+        return self._count
+
+
+class _GrowableMatrix:
+    """Amortized O(1) row-append 2D numpy buffer, same rationale as
+    _GrowableArray but for the per-record spectral histogram rows."""
+
+    def __init__(self, width, dtype=int, initial_capacity=64):
+        self._data = np.zeros((max(initial_capacity, 1), width), dtype=dtype)
+        self._count = 0
+        self._width = width
+
+    def append(self, row):
+        row = np.asarray(row)
+        if row.shape[0] != self._width:
+            new_width = max(self._width, row.shape[0])
+            if new_width != self._width:
+                grown = np.zeros((self._data.shape[0], new_width), dtype=self._data.dtype)
+                grown[:, : self._width] = self._data
+                self._data = grown
+                self._width = new_width
+            if row.shape[0] < self._width:
+                padded = np.zeros(self._width, dtype=self._data.dtype)
+                padded[: row.shape[0]] = row
+                row = padded
+        if self._count == self._data.shape[0]:
+            self._data = np.vstack([self._data, np.zeros_like(self._data)])
+        self._data[self._count, : self._width] = row
+        self._count += 1
+
+    def view(self):
+        return self._data[: self._count, : self._width]
+
+    def __len__(self):
+        return self._count
+
+
 class UARTReaderThread(QThread):
     """
     QThread that reads a live AIRDOS data stream from a serial/UART port.
@@ -696,16 +759,43 @@ class UARTReaderThread(QThread):
     def run(self):
         self._running = True
         hist = np.zeros(65536, dtype=int)
-        time_axis = []
-        sums = []
-        spectral_records = []
+        time_axis = _GrowableArray(dtype=float)
+        sums = _GrowableArray(dtype=int)
+        spectral_records = _GrowableMatrix(width=len(hist), dtype=int)
         metadata = {"log_runs_count": 0, "log_device_info": {}}
         fmt = None  # 'old' or 'v2'
         env_records = []
+        dropped_records = 0
+        session_start = time.monotonic()
+        warned_no_device_time = False
 
         # v2-specific inter-record state
         current_hist = None
         current_counts = 0
+
+        def _resolve_timestamp(parts):
+            """Timestamp for a $HIST/$STOP record, in seconds.
+
+            Uses the device-reported time (parts[2]) when available. Some
+            devices don't have an RTC and always report 0.0 there; in that
+            case fall back to elapsed host wall-clock time since this live
+            session started, so points still land at a sensible position on
+            the time axis instead of all piling up at t=0.
+            """
+            nonlocal warned_no_device_time
+            try:
+                t = float(parts[2])
+            except (ValueError, IndexError):
+                t = 0.0
+            if t == 0.0:
+                if not warned_no_device_time:
+                    logger.warning(
+                        "Device is not reporting per-record timestamps; "
+                        "falling back to host wall-clock time for the live plot."
+                    )
+                    warned_no_device_time = True
+                t = time.monotonic() - session_start
+            return t
 
         def _build_telemetry(env_recs):
             if not env_recs:
@@ -729,139 +819,156 @@ class UARTReaderThread(QThread):
             self._ser = serial.Serial(self._port, self._baud, timeout=1)
             self.connected.emit(True)
 
+            # Manually accumulate bytes and split on '\n' ourselves instead of
+            # relying on pyserial's readline(timeout=...): readline() returns
+            # whatever it has once the timeout elapses even without a
+            # terminator, so a record that is slow to arrive (e.g. a long
+            # $STOP histogram dump) gets truncated and silently mis-parsed or
+            # dropped. Buffering here means a record is only ever handed to
+            # the parser once a full line has actually been received.
+            recv_buffer = b""
             while self._running:
-                raw = self._ser.readline()
-                if not raw:
+                chunk = self._ser.read(max(1, self._ser.in_waiting))
+                if not chunk:
                     continue
-                line = raw.decode("utf-8", errors="replace").strip()
-                if not line:
-                    continue
-                parts = line.split(",")
-                msg = parts[0]
+                recv_buffer += chunk
+                while b"\n" in recv_buffer:
+                    raw, recv_buffer = recv_buffer.split(b"\n", 1)
+                    line = raw.decode("utf-8", errors="replace").strip()
+                    if not line:
+                        continue
+                    parts = line.split(",")
+                    msg = parts[0]
 
-                # --- Device header records (format-independent) ---
-                if msg == "$DOS" and len(parts) > 6:
-                    metadata["log_device_info"]["DOS"] = {
-                        "hw-model":    parts[1],
-                        "fw-version":  parts[2],
-                        "eeprom":      parts[3] if len(parts) > 3 else "",
-                        "fw-commit":   parts[4] if len(parts) > 4 else "",
-                        "fw-build_info": parts[5] if len(parts) > 5 else "",
-                        "hw-sn":       parts[6].strip() if len(parts) > 6 else "",
-                    }
-                    metadata["log_runs_count"] += 1
-                elif msg == "$ADC" and len(parts) >= 2:
-                    metadata["log_device_info"]["ADC"] = {
-                        "module-type":   parts[1] if len(parts) > 1 else "",
-                        "serial":        parts[2].strip() if len(parts) > 2 else "",
-                        "configuration": parts[3].strip() if len(parts) > 3 else "",
-                    }
-                elif msg == "$DIG" and len(parts) >= 2:
-                    metadata["log_device_info"]["DIG"] = {
-                        "module-type":   parts[1] if len(parts) > 1 else "",
-                        "serial":        parts[2].strip() if len(parts) > 2 else "",
-                        "configuration": parts[3].strip() if len(parts) > 3 else "",
-                    }
-
-                # --- Format detection ---
-                if fmt is None:
-                    if msg in ("$HIST", "$AIRDOS"):
-                        fmt = "old"
-                    elif msg in ("$START", "$STOP"):
-                        fmt = "v2"
-                    elif msg == "$DOS" and len(parts) > 2 and parts[2].startswith("2."):
-                        fmt = "v2"
-
-                # --- Old format ---
-                if fmt == "old":
-                    if msg == "$AIRDOS" and len(parts) >= 4:
-                        metadata["log_device_info"]["AIRDOS"] = {
-                            "hw-model": parts[1] if len(parts) > 1 else "",
-                            "detector": parts[2] if len(parts) > 2 else "",
-                            "hw-sn":    parts[3].strip() if len(parts) > 3 else "",
+                    # --- Device header records (format-independent) ---
+                    if msg == "$DOS" and len(parts) > 6:
+                        metadata["log_device_info"]["DOS"] = {
+                            "hw-model":    parts[1],
+                            "fw-version":  parts[2],
+                            "eeprom":      parts[3] if len(parts) > 3 else "",
+                            "fw-commit":   parts[4] if len(parts) > 4 else "",
+                            "fw-build_info": parts[5] if len(parts) > 5 else "",
+                            "hw-sn":       parts[6].strip() if len(parts) > 6 else "",
                         }
-                    elif msg == "$ENV" and len(parts) >= 5:
-                        try:
-                            env_records.append((
-                                float(parts[2]),
-                                float(parts[3]),
-                                float(parts[4]),
-                                float(parts[5]) if len(parts) > 5 else float("nan"),
-                                float(parts[6]) if len(parts) > 6 else float("nan"),
-                                float(parts[7]) if len(parts) > 7 else float("nan"),
-                                float(parts[8]) if len(parts) > 8 else float("nan"),
-                            ))
-                        except ValueError:
-                            pass
-                    elif msg == "$HIST":
-                        try:
-                            t = float(parts[2])
-                            channels = np.array(parts[8:], dtype=float).astype(int)
-                            if len(channels) > len(hist):
-                                hist = np.resize(hist, len(channels))
-                            hist[:len(channels)] += channels
-                            time_axis.append(t)
-                            sums.append(int(channels.sum()))
-                            spectral_records.append(channels.copy())
-                            metadata["log_runs_count"] = len(time_axis)
-                            sm = np.array(spectral_records)
-                            self.dataUpdated.emit(
-                                [np.array(time_axis), np.array(sums), hist.copy(), metadata, _build_telemetry(env_records), sm]
-                            )
-                        except (ValueError, IndexError):
-                            pass
+                        metadata["log_runs_count"] += 1
+                    elif msg == "$ADC" and len(parts) >= 2:
+                        metadata["log_device_info"]["ADC"] = {
+                            "module-type":   parts[1] if len(parts) > 1 else "",
+                            "serial":        parts[2].strip() if len(parts) > 2 else "",
+                            "configuration": parts[3].strip() if len(parts) > 3 else "",
+                        }
+                    elif msg == "$DIG" and len(parts) >= 2:
+                        metadata["log_device_info"]["DIG"] = {
+                            "module-type":   parts[1] if len(parts) > 1 else "",
+                            "serial":        parts[2].strip() if len(parts) > 2 else "",
+                            "configuration": parts[3].strip() if len(parts) > 3 else "",
+                        }
 
-                # --- V2 format ---
-                elif fmt == "v2":
-                    if msg == "$ENV" and len(parts) >= 5:
-                        try:
-                            env_records.append((
-                                float(parts[2]),
-                                float(parts[3]),
-                                float(parts[4]),
-                                float(parts[5]) if len(parts) > 5 else float("nan"),
-                                float(parts[6]) if len(parts) > 6 else float("nan"),
-                                float(parts[7]) if len(parts) > 7 else float("nan"),
-                                float(parts[8]) if len(parts) > 8 else float("nan"),
-                            ))
-                        except ValueError:
-                            pass
-                    elif msg == "$START":
-                        current_hist = np.zeros_like(hist)
-                        current_counts = 0
-                    elif msg == "$E" and current_hist is not None and len(parts) >= 3:
-                        try:
-                            ch = int(parts[2])
-                            if 0 <= ch < len(current_hist):
-                                current_hist[ch] += 1
-                                current_counts += 1
-                        except ValueError:
-                            pass
-                    elif msg == "$STOP" and current_hist is not None:
-                        try:
-                            for idx, val in enumerate(parts[5:]):
-                                try:
-                                    current_hist[idx] += int(val)
-                                except (ValueError, IndexError):
-                                    pass
-                            spectral_records.append(current_hist.copy())
-                            hist += current_hist
+                    # --- Format detection ---
+                    if fmt is None:
+                        if msg in ("$HIST", "$AIRDOS"):
+                            fmt = "old"
+                        elif msg in ("$START", "$STOP"):
+                            fmt = "v2"
+                        elif msg == "$DOS" and len(parts) > 2 and parts[2].startswith("2."):
+                            fmt = "v2"
+
+                    # --- Old format ---
+                    if fmt == "old":
+                        if msg == "$AIRDOS" and len(parts) >= 4:
+                            metadata["log_device_info"]["AIRDOS"] = {
+                                "hw-model": parts[1] if len(parts) > 1 else "",
+                                "detector": parts[2] if len(parts) > 2 else "",
+                                "hw-sn":    parts[3].strip() if len(parts) > 3 else "",
+                            }
+                        elif msg == "$ENV" and len(parts) >= 5:
                             try:
-                                t = float(parts[2])
+                                env_records.append((
+                                    float(parts[2]),
+                                    float(parts[3]),
+                                    float(parts[4]),
+                                    float(parts[5]) if len(parts) > 5 else float("nan"),
+                                    float(parts[6]) if len(parts) > 6 else float("nan"),
+                                    float(parts[7]) if len(parts) > 7 else float("nan"),
+                                    float(parts[8]) if len(parts) > 8 else float("nan"),
+                                ))
+                            except ValueError:
+                                dropped_records += 1
+                                logger.warning("Dropped malformed $ENV record: %r", line)
+                        elif msg == "$HIST":
+                            try:
+                                t = _resolve_timestamp(parts)
+                                channels = np.array(parts[8:], dtype=float).astype(int)
+                                if len(channels) > len(hist):
+                                    hist = np.resize(hist, len(channels))
+                                hist[:len(channels)] += channels
+                                time_axis.append(t)
+                                sums.append(int(channels.sum()))
+                                spectral_records.append(channels)
+                                metadata["log_runs_count"] = len(time_axis)
+                                self.dataUpdated.emit(
+                                    [time_axis.view(), sums.view(), hist.copy(), metadata,
+                                     _build_telemetry(env_records), spectral_records.view()]
+                                )
                             except (ValueError, IndexError):
-                                t = 0.0
-                            if t == 0.0:
-                                t = float(parts[1]) if len(parts) > 1 else float(len(time_axis))
-                            time_axis.append(t)
-                            sums.append(int(current_hist.sum()))
-                            sm = np.array(spectral_records)
-                            self.dataUpdated.emit(
-                                [np.array(time_axis), np.array(sums), hist.copy(), metadata, _build_telemetry(env_records), sm]
-                            )
-                        except (ValueError, IndexError):
-                            pass
-                        current_hist = np.zeros_like(hist)
-                        current_counts = 0
+                                dropped_records += 1
+                                logger.warning("Dropped malformed $HIST record: %r", line)
+
+                    # --- V2 format ---
+                    elif fmt == "v2":
+                        if msg == "$ENV" and len(parts) >= 5:
+                            try:
+                                env_records.append((
+                                    float(parts[2]),
+                                    float(parts[3]),
+                                    float(parts[4]),
+                                    float(parts[5]) if len(parts) > 5 else float("nan"),
+                                    float(parts[6]) if len(parts) > 6 else float("nan"),
+                                    float(parts[7]) if len(parts) > 7 else float("nan"),
+                                    float(parts[8]) if len(parts) > 8 else float("nan"),
+                                ))
+                            except ValueError:
+                                dropped_records += 1
+                                logger.warning("Dropped malformed $ENV record: %r", line)
+                        elif msg == "$START":
+                            current_hist = np.zeros_like(hist)
+                            current_counts = 0
+                        elif msg == "$E" and current_hist is not None and len(parts) >= 3:
+                            try:
+                                ch = int(parts[2])
+                                if 0 <= ch < len(current_hist):
+                                    current_hist[ch] += 1
+                                    current_counts += 1
+                            except ValueError:
+                                dropped_records += 1
+                                logger.warning("Dropped malformed $E record: %r", line)
+                        elif msg == "$STOP" and current_hist is not None:
+                            try:
+                                for idx, val in enumerate(parts[5:]):
+                                    try:
+                                        current_hist[idx] += int(val)
+                                    except (ValueError, IndexError):
+                                        pass
+                                # Prefer the device-reported timestamp, same as the
+                                # file-based parser (parsers.py); only fall back to
+                                # host wall-clock time (see _resolve_timestamp) when
+                                # the device itself reports no time (no RTC). Never
+                                # fall back to a non-time field such as the run
+                                # index, which would silently compress the x-axis.
+                                t = _resolve_timestamp(parts)
+                                spectral_records.append(current_hist)
+                                hist += current_hist
+                                time_axis.append(t)
+                                sums.append(int(current_hist.sum()))
+                                self.dataUpdated.emit(
+                                    [time_axis.view(), sums.view(), hist.copy(), metadata,
+                                     _build_telemetry(env_records), spectral_records.view()]
+                                )
+                            except (ValueError, IndexError):
+                                dropped_records += 1
+                                logger.warning("Dropped malformed $STOP record: %r", line)
+                            current_hist = np.zeros_like(hist)
+                            current_counts = 0
 
         except (serial.SerialException, TypeError):
             # TypeError happens when stop() closes the port while readline() is
@@ -869,6 +976,11 @@ class UARTReaderThread(QThread):
             if self._running:
                 self.errorOccurred.emit("Serial port closed unexpectedly.")
         finally:
+            if dropped_records:
+                logger.warning(
+                    "UART live session ended with %d dropped/malformed record(s).",
+                    dropped_records,
+                )
             if self._ser and self._ser.is_open:
                 self._ser.close()
             self.connected.emit(False)
