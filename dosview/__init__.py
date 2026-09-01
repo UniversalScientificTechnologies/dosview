@@ -1084,6 +1084,7 @@ class AirdosConfigTab(QWidget):
         
         self.i2c_parameters_tree = QTreeWidget()
         self.i2c_parameters_tree.setHeaderLabels(["Parameter", "Value"])
+        enable_tree_value_copy(self.i2c_parameters_tree)
         i2c_layout.addWidget(self.i2c_parameters_tree)
 
         # EEPROM tree
@@ -1093,6 +1094,7 @@ class AirdosConfigTab(QWidget):
         
         self.eeprom_tree = QTreeWidget()
         self.eeprom_tree.setHeaderLabels(["Parameter", "Value"])
+        enable_tree_value_copy(self.eeprom_tree)
         i2c_layout.addWidget(self.eeprom_tree)
 
         # Action buttons row
@@ -1385,6 +1387,36 @@ class DataSpectrumView(QWidget):
         #self.imv.setLabel('left', 'Y Axis')
         #self.imv.setLabel('bottom', 'X Axis')
 
+
+def enable_tree_value_copy(tree):
+    """Let the user copy cell text (e.g. the Value column) out of a QTreeWidget
+    via Ctrl+C or a right-click "Copy" menu, since these trees are read-only
+    displays with no built-in way to get text onto the clipboard."""
+    tree.setSelectionMode(QAbstractItemView.ExtendedSelection)
+    tree.setContextMenuPolicy(Qt.CustomContextMenu)
+
+    def copy_selection():
+        items = tree.selectedItems()
+        if not items:
+            return
+        lines = ["\t".join(item.text(col) for col in range(tree.columnCount()))
+                 for item in items]
+        QApplication.clipboard().setText("\n".join(lines))
+
+    def show_context_menu(pos):
+        if tree.itemAt(pos) is None:
+            return
+        menu = QMenu(tree)
+        copy_action = menu.addAction("Copy")
+        if menu.exec_(tree.viewport().mapToGlobal(pos)) == copy_action:
+            copy_selection()
+
+    tree.customContextMenuRequested.connect(show_context_menu)
+    shortcut = QShortcut(QKeySequence.Copy, tree)
+    shortcut.setContext(Qt.WidgetShortcut)
+    shortcut.activated.connect(copy_selection)
+
+
 class PlotTab(QWidget):
     def __init__(self):
         super().__init__()
@@ -1394,6 +1426,7 @@ class PlotTab(QWidget):
         self.properties_tree = QTreeWidget()
         self.properties_tree.setColumnCount(2)
         self.properties_tree.setHeaderLabels(["Property", "Value"])
+        enable_tree_value_copy(self.properties_tree)
 
         self.datalines_tree = QTreeWidget()
         self.datalines_tree.setColumnCount(1)
