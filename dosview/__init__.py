@@ -451,14 +451,31 @@ class AIRDOS04CTRL(QThread):
         QThread.__init__(self)
         self.hw = None  # Will be set on connect
         self.dev_uart = None
+        # Make this QThread object its own worker: without this, slots called
+        # on `self` (e.g. via signal/slot connections) run in whichever thread
+        # created the object (the GUI thread), not in run()'s thread, because a
+        # QThread instance's own affinity isn't automatically the thread it
+        # manages. This makes queued connections to our slots below actually
+        # execute inside run()'s event loop instead of blocking the GUI.
+        self.moveToThread(self)
 
     def run(self):
         # Main thread loop
         self.connected.emit(False)
-        while True:
-            pass
+        self.exec_()
 
     @pyqtSlot()
+    def connect_i2c(self):
+        self.connectSlot(True)
+
+    @pyqtSlot()
+    def disconnect_i2c(self):
+        self.connectSlot(False)
+
+    @pyqtSlot()
+    def poweroff_i2c(self):
+        self.connectSlot(False, True)
+
     def connectSlot(self, state=True, power_off=False):
         print("Connecting to HID device... ", state)
         if state:
@@ -1177,11 +1194,11 @@ class AirdosConfigTab(QWidget):
         self.i2c_connect_button = QPushButton("Connect")
         self.i2c_disconnect_button = QPushButton("Disconnect")
         self.i2c_disconnect_button.disabled = True
-        self.i2c_connect_button.clicked.connect(lambda: self.i2c_thread.connectSlot(True))
-        self.i2c_disconnect_button.clicked.connect(lambda: self.i2c_thread.connectSlot(False)) 
+        self.i2c_connect_button.clicked.connect(self.i2c_thread.connect_i2c)
+        self.i2c_disconnect_button.clicked.connect(self.i2c_thread.disconnect_i2c)
         
         self.i2c_power_off_button = QPushButton("Power off and Disconnect")
-        self.i2c_power_off_button.clicked.connect(lambda: self.i2c_thread.connectSlot(False, True))
+        self.i2c_power_off_button.clicked.connect(self.i2c_thread.poweroff_i2c)
         self.i2c_power_off_button.disabled = True
         
         i2c_layout_row_1.addWidget(self.i2c_connect_button)
@@ -1842,10 +1859,9 @@ class LivePlotTab(PlotTab):
         # but skipping the LoadDataThread step.
         self.plot_canvas = PlotCanvas(self)
         self.logView_splitter.addWidget(self.plot_canvas)
-        self.logView_splitter.setSizes([1, 9])
-        sizes = self.logView_splitter.sizes()
-        sizes[0] = int(sizes[1] * 0.1)
-        self.logView_splitter.setSizes(sizes)
+        self.logView_splitter.setStretchFactor(0, 0)
+        self.logView_splitter.setStretchFactor(1, 1)
+        self.logView_splitter.setSizes([1, 10000])
 
     def on_data_updated(self, data):
         """Called by UARTReaderThread after each complete record."""
