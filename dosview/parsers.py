@@ -8,10 +8,39 @@ from __future__ import annotations
 
 from typing import List, Sequence, Tuple
 
+import logging
 import time
 from pathlib import Path
 
 import numpy as np
+
+logger = logging.getLogger(__name__)
+
+# Seconds per TCNT1 tick on the AIRDOS03 AVR firmware: Timer1 runs off the
+# 8 MHz clock with a /1024 prescaler (see fw/*/src/main.cpp, TCCR1B). Used to
+# turn the raw captStart/stopSystime tick counts in $START/$STOP into a
+# duration when the device has no GNSS fix (so tm.tm_s100 is always 0).
+TICK_SECONDS = 128e-6
+
+# TCNT1 is 16-bit, so tick-based durations are only unambiguous up to one
+# full wrap of the counter.
+MAX_TICK_DURATION_S = 65536 * TICK_SECONDS
+
+
+def _fill_invalid_durations(durations: np.ndarray) -> np.ndarray:
+    """Replace non-positive/non-finite duration entries with a sane fallback.
+
+    Individual $STOP records can fail to yield a duration (malformed line).
+    Rather than let a stray zero/NaN divide-by-zero corrupt a counts/sec
+    plot, backfill with the median of the valid durations in this log (or
+    1 s, i.e. "treat as raw counts", if none are valid at all).
+    """
+    valid = np.isfinite(durations) & (durations > 0)
+    if valid.all():
+        return durations
+    durations = durations.copy()
+    durations[~valid] = np.median(durations[valid]) if valid.any() else 1.0
+    return durations
 
 
 class BaseLogParser:
@@ -60,10 +89,13 @@ class AirdosV2LogParser(BaseLogParser):
         total_counts = 0
         sums: List[int] = []
         time_axis: List[float] = []
+        durations: List[float] = []
         spectral_records: List[np.ndarray] = []
         inside_run = False
         current_hist = None
         current_counts = 0
+        current_cap_start = 0
+        prev_abs_time: float | None = None
         device_type = "unknown"
         env_records: List[Tuple[float, ...]] = []
         batt_records: List[Tuple[float, ...]] = []
@@ -102,6 +134,10 @@ class AirdosV2LogParser(BaseLogParser):
                         inside_run = True
                         current_hist = np.zeros_like(hist)
                         current_counts = 0
+                        try:
+                            current_cap_start = int(parts[2]) if len(parts) > 2 else 0
+                        except ValueError:
+                            current_cap_start = 0
                     case "$E":
                         if inside_run and len(parts) >= 3:
                             channel = int(parts[2])
@@ -110,6 +146,20 @@ class AirdosV2LogParser(BaseLogParser):
                                 current_counts += 1
                     case "$STOP":
                         if inside_run:
+                            if len(parts) > 4:
+                                try:
+                                    ev_count = int(parts[4])
+                                except ValueError:
+                                    ev_count = None
+                                if ev_count is not None and ev_count > current_counts:
+                                    logger.warning(
+                                        "Run %d: device counted %d above-threshold "
+                                        "events but only %d were transmitted — the "
+                                        "firmware's per-interval event buffer was "
+                                        "exceeded, so the spectrum is undercounted "
+                                        "above THRESHOLD for this interval.",
+                                        metadata["log_runs_count"], ev_count, current_counts,
+                                    )
                             if len(parts) > 5:
                                 for idx, val in enumerate(parts[5:]):
                                     try:
@@ -120,7 +170,27 @@ class AirdosV2LogParser(BaseLogParser):
                             hist += current_hist
                             total_counts += current_counts
                             sums.append(current_counts)
-                            time_axis.append(float(parts[2]))
+                            cur_abs_time = float(parts[2])
+                            time_axis.append(cur_abs_time)
+
+                            # Interval duration: prefer the GNSS-synced wall-clock
+                            # delta between consecutive $STOP timestamps (works for
+                            # any length); fall back to the free-running TCNT1 tick
+                            # count in captStart/stopSystime (works without GNSS,
+                            # but only unambiguous up to one 16-bit timer wrap).
+                            if prev_abs_time and cur_abs_time > prev_abs_time:
+                                durations.append(cur_abs_time - prev_abs_time)
+                            else:
+                                try:
+                                    stop_ticks = int(parts[3]) if len(parts) > 3 else None
+                                except ValueError:
+                                    stop_ticks = None
+                                if stop_ticks is not None:
+                                    ticks_elapsed = (stop_ticks - current_cap_start) & 0xFFFF
+                                    durations.append(max(ticks_elapsed, 1) * TICK_SECONDS)
+                                else:
+                                    durations.append(float("nan"))
+                            prev_abs_time = cur_abs_time if cur_abs_time else None
                         inside_run = False
                         current_hist = None
                     case "$ENV":
@@ -179,8 +249,9 @@ class AirdosV2LogParser(BaseLogParser):
             telemetry["temperature"]        = (ba[:, 0], ba[:, 5])
 
         spectral_matrix = np.array(spectral_records) if spectral_records else np.zeros((0, hist.shape[0]), dtype=int)
+        durations_arr = _fill_invalid_durations(np.array(durations, dtype=float)) if durations else np.zeros(0)
         print("Parsed AIRDOS v2 format in", time.time() - start_time, "s")
-        return [np.array(time_axis), np.array(sums), hist, metadata, telemetry, spectral_matrix]
+        return [np.array(time_axis), np.array(sums), hist, metadata, telemetry, spectral_matrix, durations_arr]
 
 
 # Backwards-compatible alias
@@ -319,6 +390,8 @@ class NpzLogParser(BaseLogParser):
             spectral_matrix = npz["spectral_matrix"]
         else:
             spectral_matrix = np.zeros((0, hist.shape[0]), dtype=int)
+        if "durations" in npz.files:
+            return [time_axis, sums, hist, metadata, telemetry, spectral_matrix, npz["durations"]]
         return [time_axis, sums, hist, metadata, telemetry, spectral_matrix]
 
 
@@ -345,4 +418,5 @@ __all__ = [
     "NpzLogParser",
     "get_parser_for_file",
     "parse_file",
+    "TICK_SECONDS",
 ]

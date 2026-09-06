@@ -44,6 +44,7 @@ from .parsers import (
     OldLogParser,
     get_parser_for_file,
     parse_file,
+    TICK_SECONDS,
 )
 from .eeprom_widget import EepromManagerWidget
 from .rtc_widget import RTCManagerWidget
@@ -144,6 +145,23 @@ class PlotCanvas(pg.GraphicsLayoutWidget):
         self._updating = False
         self._evo_region = None
         self._spec_region = None
+        self._durations = None
+        self._cur_display = np.array([])
+
+    def _extract_durations(self, data):
+        """Per-record interval length (seconds), when the source provides one.
+
+        Present for AIRDOS v2 logs/live sessions (fw 1.3+, see parsers.py);
+        absent for older logs, in which case the evolution plot falls back
+        to raw counts per record.
+        """
+        dur = data[6] if len(data) > 6 else None
+        if dur is None:
+            return None
+        dur = np.asarray(dur, dtype=float)
+        if dur.shape[0] != self._sums.shape[0]:
+            return None
+        return dur
 
     def plot(self, data):
         start_time = time.time()
@@ -163,6 +181,7 @@ class PlotCanvas(pg.GraphicsLayoutWidget):
         self._sums = np.asarray(data[1], dtype=float)
         self._hist = np.asarray(data[2], dtype=float)
         self._channels = np.arange(len(self._hist), dtype=float)
+        self._durations = self._extract_durations(data)
         sm = data[5] if len(data) > 5 else None
         if sm is not None and hasattr(sm, "ndim") and sm.ndim == 2 and sm.shape[0] >= 1 and sm.shape[1] > 0:
             self._spectral_matrix = np.asarray(sm, dtype=float)
@@ -176,7 +195,15 @@ class PlotCanvas(pg.GraphicsLayoutWidget):
                                    'bottom': SymLogAxisItem(orientation='bottom')})
 
         self.plot_evolution.showGrid(x=True, y=True)
-        self.plot_evolution.setLabel("left",  "Total count per exposition", units="#")
+        # Per-record intervals are no longer all the same length once a high-rate
+        # burst triggers an early firmware flush (see main.cpp flushDataOut()), so
+        # raw counts per record stop being comparable across records — plot a
+        # rate instead whenever a duration is known. Falls back to raw counts
+        # for sources with no duration info (older logs/firmware).
+        if self._durations is not None:
+            self.plot_evolution.setLabel("left", "Count rate", units="cps")
+        else:
+            self.plot_evolution.setLabel("left", "Total count per exposition", units="#")
         self.plot_evolution.setLabel("bottom", "Time", units="min")
 
         self._curve_evolution = self.plot_evolution.plot([], [],
@@ -240,8 +267,13 @@ class PlotCanvas(pg.GraphicsLayoutWidget):
                 idx = int(np.argmin(np.abs(self._time_axis_min - x)))
                 t = float(self._time_axis_min[idx])
                 count = float(self._cur_sums[idx])
-                px, py = t, float(symlog(count))
-                text = f"t = {t:.2f} min\ncount = {count:.0f}"
+                value = float(self._cur_display[idx])
+                px, py = t, float(symlog(value))
+                if self._durations is not None and idx < len(self._durations):
+                    duration = float(self._durations[idx])
+                    text = f"t = {t:.2f} min\nrate = {value:.2f} cps\ncount = {count:.0f} in {duration:.2f} s"
+                else:
+                    text = f"t = {t:.2f} min\ncount = {count:.0f}"
             else:
                 if not len(self._channels):
                     continue
@@ -257,13 +289,25 @@ class PlotCanvas(pg.GraphicsLayoutWidget):
                 item.setVisible(True)
 
     def _set_evolution_curve(self, sums):
-        """Draw the evolution curve (and rolling average) in symlog-y."""
+        """Draw the evolution curve (and rolling average) in symlog-y.
+
+        Plotted as counts/sec when per-record durations are known, since
+        records can now be shorter than the nominal interval (early flush on
+        a full event buffer — see flushDataOut() in firmware) and raw sums
+        of different-length records aren't directly comparable. Falls back
+        to raw counts per record otherwise.
+        """
         sums = np.asarray(sums, dtype=float)
-        self._cur_sums = sums  # currently displayed values (for the hover tooltip)
-        self._curve_evolution.setData(self._time_axis_min, symlog(sums))
+        self._cur_sums = sums  # raw per-record counts (for the hover tooltip)
+        if self._durations is not None and self._durations.shape[0] == sums.shape[0]:
+            display = sums / self._durations
+        else:
+            display = sums
+        self._cur_display = display  # currently displayed values (for the hover tooltip)
+        self._curve_evolution.setData(self._time_axis_min, symlog(display))
         window_size = self.WINDOW_SIZE
-        if len(sums) >= window_size:
-            rolling_avg = np.convolve(sums, np.ones(window_size) / window_size, mode='valid')
+        if len(display) >= window_size:
+            rolling_avg = np.convolve(display, np.ones(window_size) / window_size, mode='valid')
             self._curve_rolling_avg.setData(self._time_axis_min[window_size - 1:], symlog(rolling_avg))
         else:
             self._curve_rolling_avg.setData([], [])
@@ -393,6 +437,7 @@ class PlotCanvas(pg.GraphicsLayoutWidget):
         self._sums = np.asarray(data[1], dtype=float)
         self._hist = np.asarray(data[2], dtype=float)
         self._channels = np.arange(len(self._hist), dtype=float)
+        self._durations = self._extract_durations(data)
         sm = data[5] if len(data) > 5 else None
         if sm is not None and hasattr(sm, "ndim") and sm.ndim == 2 and sm.shape[0] >= 1 and sm.shape[1] > 0:
             self._spectral_matrix = np.asarray(sm, dtype=float)
@@ -778,6 +823,7 @@ class UARTReaderThread(QThread):
         hist = np.zeros(65536, dtype=int)
         time_axis = _GrowableArray(dtype=float)
         sums = _GrowableArray(dtype=int)
+        durations = _GrowableArray(dtype=float)
         spectral_records = _GrowableMatrix(width=len(hist), dtype=int)
         metadata = {"log_runs_count": 0, "log_device_info": {}}
         fmt = None  # 'old' or 'v2'
@@ -788,6 +834,8 @@ class UARTReaderThread(QThread):
 
         # v2-specific inter-record state
         current_hist = None
+        current_cap_start = 0
+        prev_abs_time = None
         current_counts = 0
 
         def _resolve_timestamp(parts):
@@ -950,6 +998,10 @@ class UARTReaderThread(QThread):
                         elif msg == "$START":
                             current_hist = np.zeros_like(hist)
                             current_counts = 0
+                            try:
+                                current_cap_start = int(parts[2]) if len(parts) > 2 else 0
+                            except ValueError:
+                                current_cap_start = 0
                         elif msg == "$E" and current_hist is not None and len(parts) >= 3:
                             try:
                                 ch = int(parts[2])
@@ -961,6 +1013,20 @@ class UARTReaderThread(QThread):
                                 logger.warning("Dropped malformed $E record: %r", line)
                         elif msg == "$STOP" and current_hist is not None:
                             try:
+                                if len(parts) > 4:
+                                    try:
+                                        ev_count = int(parts[4])
+                                    except ValueError:
+                                        ev_count = None
+                                    if ev_count is not None and ev_count > current_counts:
+                                        logger.warning(
+                                            "Device counted %d above-threshold events "
+                                            "but only %d were transmitted — the "
+                                            "firmware's per-interval event buffer was "
+                                            "exceeded, so the spectrum is undercounted "
+                                            "above THRESHOLD for this interval.",
+                                            ev_count, current_counts,
+                                        )
                                 for idx, val in enumerate(parts[5:]):
                                     try:
                                         current_hist[idx] += int(val)
@@ -973,13 +1039,38 @@ class UARTReaderThread(QThread):
                                 # fall back to a non-time field such as the run
                                 # index, which would silently compress the x-axis.
                                 t = _resolve_timestamp(parts)
+
+                                # Interval duration: _resolve_timestamp already gives a
+                                # monotonically increasing clock (device time when
+                                # GNSS-synced, host wall-clock otherwise), so a plain
+                                # delta against the previous record works for the
+                                # normal case. Only fall back to the free-running
+                                # TCNT1 ticks in captStart/stopSystime — and finally to
+                                # the old fixed cadence — for the first record, or if
+                                # a GNSS sync/unsync transition made time run backwards.
+                                if prev_abs_time is not None and t > prev_abs_time:
+                                    duration = t - prev_abs_time
+                                else:
+                                    try:
+                                        stop_ticks = int(parts[3]) if len(parts) > 3 else None
+                                    except ValueError:
+                                        stop_ticks = None
+                                    if stop_ticks is not None:
+                                        ticks_elapsed = (stop_ticks - current_cap_start) & 0xFFFF
+                                        duration = max(ticks_elapsed, 1) * TICK_SECONDS
+                                    else:
+                                        duration = 10.0
+                                prev_abs_time = t
+                                durations.append(duration)
+
                                 spectral_records.append(current_hist)
                                 hist += current_hist
                                 time_axis.append(t)
                                 sums.append(int(current_hist.sum()))
                                 self.dataUpdated.emit(
                                     [time_axis.view(), sums.view(), hist.copy(), metadata,
-                                     _build_telemetry(env_records), spectral_records.view()]
+                                     _build_telemetry(env_records), spectral_records.view(),
+                                     durations.view()]
                                 )
                             except (ValueError, IndexError):
                                 dropped_records += 1
@@ -1840,6 +1931,8 @@ class PlotTab(QWidget):
                 arrays[f"telemetry_value_{key}"] = v
         if len(data) > 5 and data[5] is not None and hasattr(data[5], "shape") and data[5].ndim == 2:
             arrays["spectral_matrix"] = data[5]
+        if len(data) > 6 and data[6] is not None:
+            arrays["durations"] = data[6]
         np.savez_compressed(path, **arrays)
 
 
